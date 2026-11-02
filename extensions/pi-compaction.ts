@@ -4,7 +4,7 @@
  * 触发时机和切点都交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
  *   切点 = event.preparation.firstKeptEntryId（pi 按 compaction.keepRecentTokens 算好的，默认 20000 tok）
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
- *   工具参数与结果的截断长度可配置（~/.pi/agent/pi-compaction.json 的 toolChars，默认 500）
+ *   工具参数的截断长度、工具结果的头/尾长度各自可配（~/.pi/agent/pi-compaction.json）
  *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
  *
  * 铁律：永远不 return undefined / 不抛错给 pi —— 那两条路径都会落到 pi 的默认 LLM 摘要。
@@ -15,53 +15,69 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** 工具参数 / 结果默认截断长度。实测本机 toolResult 的 p50 = 411、p90 = 6333 */
-const DEFAULT_TOOL_CHARS = 500;
+/**
+ * 三个截断长度，单位都是字符（不是 token）。
+ *
+ * - toolArgs：工具参数的头部长度。JSON 的关键字段（command / path / pattern）都在前面。
+ * - toolResultHead / toolResultTail：工具结果的头尾长度。bash 的 exit code、报错、栈底
+ *   都在末尾，只取头会把「失败了」这条消息整个切掉。
+ *
+ * 实测本机 toolResult 的 p50 = 411、p90 = 6333，默认 200 + 100 能覆盖一半以上。
+ */
+const DEFAULTS = { toolArgs: 300, toolResultHead: 200, toolResultTail: 100 };
 
 const CONFIG_PATH = join(getAgentDir(), "pi-compaction.json");
 
+type ClipConfig = typeof DEFAULTS;
+
+const isCharCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
 /**
  * 读配置。每次压缩读一次（压缩很少发生，开销可以忽略），这样改完配置不用重启。
- * 文件不存在或坏了就用默认值 —— 绝不因为配置问题影响压缩。
+ * 单项非法就用该项的默认值，整个文件坏了就用全部默认值 —— 绝不因为配置问题影响压缩。
  */
-const loadConfig = (): { toolChars: number } => {
+const loadConfig = (): ClipConfig => {
+	let raw: any;
 	try {
-		const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-		const n = raw?.toolChars;
-		const valid = typeof n === "number" && Number.isSafeInteger(n) && n > 0;
-		return { toolChars: valid ? n : DEFAULT_TOOL_CHARS };
+		raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
 	} catch {
-		return { toolChars: DEFAULT_TOOL_CHARS };
+		return { ...DEFAULTS };
 	}
+	// 老版本只有一个 toolChars：按 70% / 30% 拆成头尾，工具参数沿用它
+	if (raw?.toolChars !== undefined) {
+		const n = raw.toolChars;
+		if (isCharCount(n) && n > 0) {
+			const head = Math.round(n * 0.7);
+			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head };
+		}
+	}
+	return {
+		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
+		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
+		toolResultTail: isCharCount(raw?.toolResultTail) ? raw.toolResultTail : DEFAULTS.toolResultTail,
+	};
 };
 
 /** 第一次跑的时候生成一份默认配置，省得用户不知道有这个开关 */
 const scaffoldConfig = () => {
 	if (existsSync(CONFIG_PATH)) return;
 	try {
-		writeFileSync(CONFIG_PATH, `${JSON.stringify({ toolChars: DEFAULT_TOOL_CHARS }, null, 2)}\n`);
+		writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULTS, null, 2)}\n`);
 	} catch {
 		// 只读文件系统之类的情况，忽略
 	}
 };
 
-/** 工具参数：只取头部（JSON 的关键字段在前） */
+/** 只保留头部 n 个字符（工具参数用） */
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)}…(+${s.length - n})`);
 
-/**
- * 工具结果：头 70% + 尾 30%。
- * bash 的 exit code / 报错 / 栈底都在末尾，只取头会把「失败了」这个消息整个切掉。
- */
-const makeClipTail = (limit: number) => {
-	const head = Math.round(limit * 0.7);
-	const tail = limit - head;
-	return (s: string) => {
-		if (s.length <= limit) return s;
-		const cut = s.length - limit;
-		// 只超一点点：截头就够，不值得为几十个字插两个标记
-		if (cut < tail) return `${s.slice(0, limit)}…(+${cut})`;
-		return `${s.slice(0, head)}…(+${cut})…${s.slice(-tail)}`;
-	};
+/** 保留头 head 个 + 尾 tail 个（工具结果用）。头尾都是 0 时会退化成只剩一个截断标记 */
+const clipHeadTail = (s: string, head: number, tail: number) => {
+	if (s.length <= head + tail) return s;
+	const cut = s.length - head - tail;
+	const h = s.slice(0, head);
+	const t = tail > 0 ? s.slice(-tail) : "";
+	return `${h}…(+${cut})${tail > 0 ? "…" : ""}${t}`;
 };
 
 /**
@@ -93,17 +109,15 @@ const FORMAT_RE = new RegExp(`^${FORMAT_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
 
-const makeText =
-	(clipTail: (s: string) => string) =>
-	(c: unknown): string =>
-		typeof c === "string"
+const text = (c: unknown): string =>
+	typeof c === "string"
+		? c
+		: Array.isArray(c)
 			? c
-			: Array.isArray(c)
-				? c
-						.map((p: any) => (p.type === "text" ? p.text : p.type === "image" ? imgTag(p.mimeType) : ""))
-						.filter(Boolean)
-						.join("\n")
-				: "";
+					.map((p: any) => (p.type === "text" ? p.text : p.type === "image" ? imgTag(p.mimeType) : ""))
+					.filter(Boolean)
+					.join("\n")
+			: "";
 
 /** 全局 #N：会话文件里第 N 个 type==="message" 条目（append-only，永不复用） */
 const buildRefs = (entries: any[]) => {
@@ -141,10 +155,9 @@ const liveFromLastCompaction = (branch: any[]) => {
 };
 
 const makeRender =
-	(toolChars: number) =>
+	(cfg: ClipConfig) =>
 	(entries: any[], ref: Map<string, number>): string => {
-		const clipTail = makeClipTail(toolChars);
-		const text = makeText(clipTail);
+		const clipResult = (s: string) => clipHeadTail(s, cfg.toolResultHead, cfg.toolResultTail);
 		const out: string[] = [];
 		for (const e of entries) {
 			const r = ref.get(e.id);
@@ -161,12 +174,12 @@ const makeRender =
 				// 用户敲的 ! 命令：命令原文，输出头+尾截断
 				// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
 				if (msg.excludeFromContext) continue;
-				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipTail(msg.output ?? "")}`);
+				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipResult(msg.output ?? "")}`);
 				continue;
 			}
 			for (const m of convertToLlm([msg])) {
 				if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
-				else if (m.role === "toolResult") out.push(`→${t} ${clipTail(esc(text(m.content)))}`);
+				else if (m.role === "toolResult") out.push(`→${t} ${clipResult(esc(text(m.content)))}`);
 				else if (m.role === "assistant" && Array.isArray(m.content)) {
 					// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
 					let buf: string[] = [];
@@ -179,7 +192,7 @@ const makeRender =
 						else if (p.type === "image") buf.push(imgTag(p.mimeType));
 						else if (p.type === "toolCall") {
 							flush();
-							out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), toolChars)}`);
+							out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), cfg.toolArgs)}`);
 						}
 						// thinking 块直接不输出
 					}
@@ -217,8 +230,7 @@ export default function (pi: ExtensionAPI) {
 				return { cancel: true };
 			}
 
-			const { toolChars } = loadConfig();
-			const body = makeRender(toolChars)(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
+			const body = makeRender(loadConfig())(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
 				notify("待压缩的历史渲染为空，已取消", "warning");
 				return { cancel: true };
