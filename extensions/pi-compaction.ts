@@ -1,39 +1,67 @@
 /**
  * pi-compaction — 用「过滤 + 截断」代替 pi 的 LLM 摘要。
  *
- * 触发时机完全交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
+ * 触发时机和切点都交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
+ *   切点 = event.preparation.firstKeptEntryId（pi 按 compaction.keepRecentTokens 算好的，默认 20000 tok）
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
- *   工具参数截断到 500 字（取头部）；工具结果 500 字（头 350 + 尾 150，exit code / 报错在末尾）
- *   最近 20 条消息原样保留（真实消息，不是文本）；多轮时只从上一轮的 firstKeptEntryId 起算
+ *   工具参数与结果的截断长度可配置（~/.pi/agent/pi-compaction.json 的 toolChars，默认 500）
  *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
  *
  * 铁律：永远不 return undefined / 不抛错给 pi —— 那两条路径都会落到 pi 的默认 LLM 摘要。
  */
 
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** 尾部原样保留的消息条数。实测 20 条 ≈ 6.3k token（1M 窗口的 0.6%），够覆盖一到两个完整工具回合 */
-const KEEP_MSGS = 20;
+/** 工具参数 / 结果默认截断长度。实测本机 toolResult 的 p50 = 411、p90 = 6333 */
+const DEFAULT_TOOL_CHARS = 500;
+
+const CONFIG_PATH = join(getAgentDir(), "pi-compaction.json");
+
 /**
- * 工具参数 / 结果的截断长度。实测本机 toolResult 的 p50 = 411、p90 = 6333，
- * 500 刚好在 p50 之上 —— 一半以上的结果原样进摘要，长的才截。
+ * 读配置。每次压缩读一次（压缩很少发生，开销可以忽略），这样改完配置不用重启。
+ * 文件不存在或坏了就用默认值 —— 绝不因为配置问题影响压缩。
  */
-const TOOL_CHARS = 500;
+const loadConfig = (): { toolChars: number } => {
+	try {
+		const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+		const n = raw?.toolChars;
+		const valid = typeof n === "number" && Number.isSafeInteger(n) && n > 0;
+		return { toolChars: valid ? n : DEFAULT_TOOL_CHARS };
+	} catch {
+		return { toolChars: DEFAULT_TOOL_CHARS };
+	}
+};
 
-const HEAD = Math.round(TOOL_CHARS * 0.7); // 350
-const TAIL = TOOL_CHARS - HEAD; // 150
+/** 第一次跑的时候生成一份默认配置，省得用户不知道有这个开关 */
+const scaffoldConfig = () => {
+	if (existsSync(CONFIG_PATH)) return;
+	try {
+		writeFileSync(CONFIG_PATH, `${JSON.stringify({ toolChars: DEFAULT_TOOL_CHARS }, null, 2)}\n`);
+	} catch {
+		// 只读文件系统之类的情况，忽略
+	}
+};
 
 /** 工具参数：只取头部（JSON 的关键字段在前） */
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)}…(+${s.length - n})`);
 
-/** 工具结果：头 70% + 尾 30%（bash 的 exit code、报错、栈底都在末尾） */
-const clipTail = (s: string) => {
-	if (s.length <= TOOL_CHARS) return s;
-	const cut = s.length - TOOL_CHARS;
-	// 只超一点点：截头就够，不值得为几十个字插两个标记
-	if (cut < TAIL) return `${s.slice(0, TOOL_CHARS)}…(+${cut})`;
-	return `${s.slice(0, HEAD)}…(+${cut})…${s.slice(-TAIL)}`;
+/**
+ * 工具结果：头 70% + 尾 30%。
+ * bash 的 exit code / 报错 / 栈底都在末尾，只取头会把「失败了」这个消息整个切掉。
+ */
+const makeClipTail = (limit: number) => {
+	const head = Math.round(limit * 0.7);
+	const tail = limit - head;
+	return (s: string) => {
+		if (s.length <= limit) return s;
+		const cut = s.length - limit;
+		// 只超一点点：截头就够，不值得为几十个字插两个标记
+		if (cut < tail) return `${s.slice(0, limit)}…(+${cut})`;
+		return `${s.slice(0, head)}…(+${cut})…${s.slice(-tail)}`;
+	};
 };
 
 /**
@@ -65,15 +93,17 @@ const FORMAT_RE = new RegExp(`^${FORMAT_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
 
-const text = (c: unknown): string =>
-	typeof c === "string"
-		? c
-		: Array.isArray(c)
+const makeText =
+	(clipTail: (s: string) => string) =>
+	(c: unknown): string =>
+		typeof c === "string"
 			? c
-					.map((p: any) => (p.type === "text" ? p.text : p.type === "image" ? imgTag(p.mimeType) : ""))
-					.filter(Boolean)
-					.join("\n")
-			: "";
+			: Array.isArray(c)
+				? c
+						.map((p: any) => (p.type === "text" ? p.text : p.type === "image" ? imgTag(p.mimeType) : ""))
+						.filter(Boolean)
+						.join("\n")
+				: "";
 
 /** 全局 #N：会话文件里第 N 个 type==="message" 条目（append-only，永不复用） */
 const buildRefs = (entries: any[]) => {
@@ -110,53 +140,61 @@ const liveFromLastCompaction = (branch: any[]) => {
 	return branch.slice(start).filter(isVisible);
 };
 
-const render = (entries: any[], ref: Map<string, number>): string => {
-	const out: string[] = [];
-	for (const e of entries) {
-		const r = ref.get(e.id);
-		const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
-		if (e.type === "branch_summary") {
-			// pi 会把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
-			if (!e.summary) continue;
-			out.push(`[user${t}]\n${esc(e.summary)}`);
-			continue;
-		}
-		const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
-		if (!msg) continue;
-		if (msg.role === "bashExecution") {
-			// 用户敲的 ! 命令：命令原文，输出头+尾截断
-			// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
-			if (msg.excludeFromContext) continue;
-			out.push(`[user${t}] $ ${esc(msg.command)}\n${clipTail(msg.output ?? "")}`);
-			continue;
-		}
-		for (const m of convertToLlm([msg])) {
-			if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
-			else if (m.role === "toolResult") out.push(`→${t} ${clipTail(esc(text(m.content)))}`);
-			else if (m.role === "assistant" && Array.isArray(m.content)) {
-				// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
-				let buf: string[] = [];
-				const flush = () => {
-					if (buf.length) out.push(`[assistant${t}]\n${buf.join("\n")}`);
-					buf = [];
-				};
-				for (const p of m.content as any[]) {
-					if (p.type === "text") buf.push(esc(p.text));
-					else if (p.type === "image") buf.push(imgTag(p.mimeType));
-					else if (p.type === "toolCall") {
-						flush();
-						out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), TOOL_CHARS)}`);
+const makeRender =
+	(toolChars: number) =>
+	(entries: any[], ref: Map<string, number>): string => {
+		const clipTail = makeClipTail(toolChars);
+		const text = makeText(clipTail);
+		const out: string[] = [];
+		for (const e of entries) {
+			const r = ref.get(e.id);
+			const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
+			if (e.type === "branch_summary") {
+				// pi 会把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
+				if (!e.summary) continue;
+				out.push(`[user${t}]\n${esc(e.summary)}`);
+				continue;
+			}
+			const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
+			if (!msg) continue;
+			if (msg.role === "bashExecution") {
+				// 用户敲的 ! 命令：命令原文，输出头+尾截断
+				// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
+				if (msg.excludeFromContext) continue;
+				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipTail(msg.output ?? "")}`);
+				continue;
+			}
+			for (const m of convertToLlm([msg])) {
+				if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
+				else if (m.role === "toolResult") out.push(`→${t} ${clipTail(esc(text(m.content)))}`);
+				else if (m.role === "assistant" && Array.isArray(m.content)) {
+					// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
+					let buf: string[] = [];
+					const flush = () => {
+						if (buf.length) out.push(`[assistant${t}]\n${buf.join("\n")}`);
+						buf = [];
+					};
+					for (const p of m.content as any[]) {
+						if (p.type === "text") buf.push(esc(p.text));
+						else if (p.type === "image") buf.push(imgTag(p.mimeType));
+						else if (p.type === "toolCall") {
+							flush();
+							out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), toolChars)}`);
+						}
+						// thinking 块直接不输出
 					}
-					// thinking 块直接不输出
+					flush();
 				}
-				flush();
 			}
 		}
-	}
-	return out.join("\n\n");
-};
+		return out.join("\n\n");
+	};
 
 export default function (pi: ExtensionAPI) {
+	pi.on("session_start", () => {
+		scaffoldConfig();
+	});
+
 	pi.on("session_before_compact", (event, ctx) => {
 		const notify = (message: string, kind: "info" | "warning" = "info") => {
 			if (ctx.hasUI) ctx.ui.notify(message, kind);
@@ -168,44 +206,33 @@ export default function (pi: ExtensionAPI) {
 			// + 全部历史渲染，越压越大。所以从最后一个 compaction 的 firstKeptEntryId 起算。
 			const live = liveFromLastCompaction(event.branchEntries);
 
-			// 从末尾数 KEEP_MSGS 条，之前的部分压成文本
-			let cut = Math.max(0, live.length - KEEP_MSGS);
-			// 切点不能落在 toolResult 上，否则 toolCall 和结果会被拆开
-			while (cut < live.length) {
-				const e = live[cut];
-				if (e.type === "message" && e.message.role === "toolResult") cut++;
-				else break;
+			// 切点直接用 pi 算好的那个：它按 compaction.keepRecentTokens（默认 20000 tok）
+			// 从末尾往回累加，并且保证落在合法边界上（不会把 toolCall 和 toolResult 拆开）。
+			// 我们不重复实现这套逻辑，只负责把切点之前的内容渲染成文本。
+			const cut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);
+			if (cut <= 0) {
+				// cut === 0：pi 说一条都不用压（本来也不会调到这里）
+				// cut === -1：切点不在可见条目里，说明这一轮没得压
+				notify("这一轮没有可压缩的内容，已跳过", "warning");
+				return { cancel: true };
 			}
 
-			if (cut === 0) {
-				// 没有比最近 KEEP_MSGS 条更早的内容
-				if (event.reason === "manual") {
-					notify(`最近 ${KEEP_MSGS} 条消息之前的没有内容，无需压缩`);
-					return { cancel: true };
-				}
-				// 自动阈值 / 溢出：pi 已经判定超预算，改用它的切点做算法压缩
-				const piCut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);
-				if (piCut <= 0) return { cancel: true };
-				cut = piCut;
-			}
-
-			const body = render(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
+			const { toolChars } = loadConfig();
+			const body = makeRender(toolChars)(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
 				notify("待压缩的历史渲染为空，已取消", "warning");
 				return { cancel: true };
 			}
 
 			// 多轮：上一轮的摘要原样前置（剥掉它自己的格式说明和尾注，避免每轮累加）
-			const prev = event.preparation.previousSummary
-				?.replace(FORMAT_RE, "")
-				.replace(TAIL_RE, "")
-				.trim();
+			const prev = event.preparation.previousSummary?.replace(FORMAT_RE, "").replace(TAIL_RE, "").trim();
 			const summary = `${FORMAT_NOTE}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
 
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId: live[cut]?.id ?? "",
+					// 原样用 pi 的切点
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
 					tokensBefore: event.preparation.tokensBefore,
 				},
 			};
