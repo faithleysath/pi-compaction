@@ -24,7 +24,13 @@ import { convertToLlm, getAgentDir } from "@earendil-works/pi-coding-agent";
  *
  * 实测本机 toolResult 的 p50 = 411、p90 = 6333，默认 200 + 100 能覆盖一半以上。
  */
-const DEFAULTS = { toolArgs: 300, toolResultHead: 200, toolResultTail: 100 };
+const DEFAULTS = {
+	toolArgs: 300,
+	toolResultHead: 200,
+	toolResultTail: 100,
+	/** 多轮压缩时，把旧轮次里的工具调用折成一行「调用工具 N 次 #a–#b」，只有最新一轮保留细节 */
+	collapseOldTools: true,
+};
 
 const CONFIG_PATH = join(getAgentDir(), "pi-compaction.json");
 
@@ -48,13 +54,14 @@ const loadConfig = (): ClipConfig => {
 		const n = raw.toolChars;
 		if (isCharCount(n) && n > 0) {
 			const head = Math.round(n * 0.7);
-			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head };
+			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head, collapseOldTools: DEFAULTS.collapseOldTools };
 		}
 	}
 	return {
 		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
 		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
 		toolResultTail: isCharCount(raw?.toolResultTail) ? raw.toolResultTail : DEFAULTS.toolResultTail,
+		collapseOldTools: typeof raw?.collapseOldTools === "boolean" ? raw.collapseOldTools : DEFAULTS.collapseOldTools,
 	};
 };
 
@@ -99,12 +106,13 @@ const esc = (s: string) =>
  * 84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。
  */
 const FORMAT_NOTE =
-	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本。";
+	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取。";
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。";
 const TAIL_RE = /\n*---\n可用 recall 工具按 #N 取原文[^\n]*\n?\s*$/;
-const FORMAT_RE = new RegExp(`^${FORMAT_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n*`);
+/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
+const FORMAT_RE = /^格式：[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
@@ -152,6 +160,66 @@ const liveFromLastCompaction = (branch: any[]) => {
 		break;
 	}
 	return branch.slice(start).filter(isVisible);
+};
+
+/**
+ * 多轮压缩时折叠旧轮次的工具调用。
+ *
+ * 上一轮的摘要原样前置进来，里面每条工具调用和结果都是两三行文本 —— 轮次一多，
+ * 摘要就被这些历史细节撑爆。这里把**连续的工具调用块**合并成一行
+ * 「（调用工具 N 次 #a–#b）」，用户消息和助手正文一字不动。
+ *
+ * 只处理 `* name#N ...` 和 `→#N ...` 开头的块。正文里长得像条目的行早被 esc()
+ * 加了反斜杠，不会误伤（`\* ` 不匹配 `^\* `）。
+ */
+const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: number; hi: number }) => string) => {
+	// 一个块 = 一个条目，从「行首是结构标记」到下一个结构标记为止
+	const NEW_BLOCK = /^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #])|---\s*$)/;
+	const isToolLine = (l: string) => /^(\* |→(?=[ #]))/.test(l);
+
+	const lines = text.split("\n");
+	type Block = { tool: boolean; lines: string[] };
+	const blocks: Block[] = [];
+	let cur: Block | null = null;
+	for (const line of lines) {
+		if (NEW_BLOCK.test(line)) {
+			if (cur) blocks.push(cur);
+			cur = { tool: isToolLine(line), lines: [line] };
+		} else if (cur) cur.lines.push(line);
+		else cur = { tool: false, lines: [line] };
+	}
+	if (cur) blocks.push(cur);
+
+	const out: string[] = [];
+	let run: Block[] = [];
+	const flush = () => {
+		if (!run.length) return;
+		let calls = 0;
+		const nums: number[] = [];
+		for (const b of run) {
+			const head = b.lines[0];
+			if (head.startsWith("* ")) calls++;
+			const m = head.match(/#(\d+)/);
+			if (m) nums.push(Number(m[1]));
+		}
+		if (calls === 0) {
+			// 只有结果行（正常不会发生），原样吐回去
+			for (const b of run) out.push(b.lines.join("\n"));
+		} else {
+			out.push(marker({ calls, lo: Math.min(...nums), hi: Math.max(...nums) }));
+		}
+		run = [];
+	};
+	for (const b of blocks) {
+		if (b.tool) {
+			run.push(b);
+			continue;
+		}
+		flush();
+		out.push(b.lines.join("\n").replace(/\n+$/, ""));
+	}
+	flush();
+	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 };
 
 const makeRender =
@@ -230,14 +298,23 @@ export default function (pi: ExtensionAPI) {
 				return { cancel: true };
 			}
 
-			const body = makeRender(loadConfig())(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
+			const cfg = loadConfig();
+			const body = makeRender(cfg)(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
 				notify("待压缩的历史渲染为空，已取消", "warning");
 				return { cancel: true };
 			}
 
 			// 多轮：上一轮的摘要原样前置（剥掉它自己的格式说明和尾注，避免每轮累加）
-			const prev = event.preparation.previousSummary?.replace(FORMAT_RE, "").replace(TAIL_RE, "").trim();
+			let prev = event.preparation.previousSummary?.replace(FORMAT_RE, "").replace(TAIL_RE, "").trim();
+
+			// 折叠旧轮次的工具调用：只有最新一轮（body）保留完整细节
+			if (prev && cfg.collapseOldTools) {
+				prev = collapseToolBlocks(prev, ({ calls, lo, hi }) =>
+					`（调用工具 ${calls} 次 ${lo === hi ? `#${lo}` : `#${lo}–#${hi}`}）`,
+				);
+			}
+
 			const summary = `${FORMAT_NOTE}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
 
 			return {
