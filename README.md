@@ -124,6 +124,12 @@ handler 抛错也会被 pi 当成弃权，所以外层有 `try/catch` 兜底。
   这时会借用 pi 的 token 切点兜底。
 - **monorepo 子目录不支持**。pi 的 git 源只能指向仓库根目录。
 
+## 逐行动画解读
+
+`docs/compaction-explainer.html` —— 一个自包含的单文件页面（双击就能开），
+13 步动画把 `render()` 的每一段拆开讲：切点怎么算、编号加在哪、什么地方要转义、
+图片和 `!!` 命令怎么处理。代码面板里高亮的就是真实的源码行。
+
 ## License
 
 MIT
