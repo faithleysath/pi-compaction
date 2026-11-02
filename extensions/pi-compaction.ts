@@ -4,7 +4,7 @@
  * 触发时机完全交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
  *   工具参数截断到 500 字（取头部）；工具结果 500 字（头 350 + 尾 150，exit code / 报错在末尾）
- *   最近 20 条消息原样保留（真实消息，不是文本）
+ *   最近 20 条消息原样保留（真实消息，不是文本）；多轮时只从上一轮的 firstKeptEntryId 起算
  *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
  *
  * 铁律：永远不 return undefined / 不抛错给 pi —— 那两条路径都会落到 pi 的默认 LLM 摘要。
@@ -88,11 +88,39 @@ const isVisible = (e: any) =>
 	e.type === "custom_message" ||
 	e.type === "branch_summary";
 
+/**
+ * 取出「还没被折叠」的那段条目。
+ *
+ * event.branchEntries 是整个分支（根 → 叶），上一轮被压掉的消息也在里面 ——
+ * 它们已经变成 previousSummary 的一段文本了。如果从头渲染，第 2 轮就会把
+ * 同一批内容再渲染一遍（实测摘要膨胀 3.4 倍，第 3 轮更糟）。
+ *
+ * 所以找到最后一个 compaction 条目，从它的 firstKeptEntryId 开始算。
+ * 找不到那个 id（比如上轮用了 compact-all 的空串哨兵）就从 compaction 之后开始。
+ */
+const liveFromLastCompaction = (branch: any[]) => {
+	let start = 0;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if (branch[i].type !== "compaction") continue;
+		const keepId = branch[i].firstKeptEntryId;
+		const ki = keepId ? branch.findIndex((e: any) => e.id === keepId) : -1;
+		start = ki >= 0 ? ki : i + 1;
+		break;
+	}
+	return branch.slice(start).filter(isVisible);
+};
+
 const render = (entries: any[], ref: Map<string, number>): string => {
 	const out: string[] = [];
 	for (const e of entries) {
 		const r = ref.get(e.id);
 		const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
+		if (e.type === "branch_summary") {
+			// pi 会把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
+			if (!e.summary) continue;
+			out.push(`[user${t}]\n${esc(e.summary)}`);
+			continue;
+		}
 		const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
 		if (!msg) continue;
 		if (msg.role === "bashExecution") {
@@ -135,7 +163,10 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		try {
-			const live = event.branchEntries.filter(isVisible);
+			// event.branchEntries 是「从根到叶子」的全部条目，里面还躺着上一轮已经折进
+			// previousSummary 的那批消息。不跳过它们就会重复渲染：第 2 轮摘要 = 上轮摘要
+			// + 全部历史渲染，越压越大。所以从最后一个 compaction 的 firstKeptEntryId 起算。
+			const live = liveFromLastCompaction(event.branchEntries);
 
 			// 从末尾数 KEEP_MSGS 条，之前的部分压成文本
 			let cut = Math.max(0, live.length - KEEP_MSGS);
