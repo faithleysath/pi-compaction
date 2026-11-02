@@ -1,0 +1,14 @@
+{
+  "name": "pi-compaction",
+  "version": "0.1.0",
+  "description": "Algorithmic context compaction for pi — filter and truncate instead of an LLM summary, with #N recall of the originals",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/pi-compaction.ts", "./extensions/pi-recall.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
