@@ -57,6 +57,43 @@ const esc = (s: string) =>
 const FORMAT_NOTE =
 	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本。";
 
+/**
+ * 摘要最多占模型窗口的这个比例。多轮压缩是把上一轮整段前置，所以摘要会一直长；
+ * 一旦它自己就吃掉窗口，pi 的 prepareCompaction 会因为「尾巴不超 keepRecentTokens」
+ * 而返回 undefined —— 什么都不压，请求永远溢出，只能 /new。
+ * 超出这个比例就从最旧的一轮开始丢。
+ */
+const SUMMARY_SHARE = 0.5;
+
+/** 按轮切段（每轮之间用 `\n\n---\n\n` 分隔） */
+const splitRounds = (text: string) => text.split("\n\n---\n\n");
+
+/** 按行从前面截，保留最近的；切断处补一行说明 */
+const clipFront = (text: string, budgetChars: number) => {
+	if (text.length <= budgetChars) return text;
+	const keep = text.slice(text.length - budgetChars);
+	const nl = keep.indexOf("\n");
+	const body = nl >= 0 ? keep.slice(nl + 1) : keep;
+	return `（更早的内容因超出上下文预算已丢弃）\n${body}`;
+};
+
+/**
+ * 把摘要压进预算：先按**轮**丢（最旧的先丢），一轮都放不下就按行从前面截。
+ * 丢的时候留一行说明，免得模型以为历史就那么短。
+ */
+const fitSummary = (rounds: string[], budgetChars: number) => {
+	const SEP = "\n\n---\n\n";
+	let out = rounds;
+	let dropped = 0;
+	while (out.length > 1 && out.join(SEP).length > budgetChars) {
+		out = out.slice(1);
+		dropped++;
+	}
+	let text = out.join(SEP);
+	if (dropped > 0) text = `（更早的 ${dropped} 轮摘要因超出上下文预算已丢弃）${SEP}${text}`;
+	return clipFront(text, budgetChars);
+};
+
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。";
 const TAIL_RE = /\n*---\n可用 recall 工具按 #N 取原文[^\n]*\n?\s*$/;
@@ -200,7 +237,17 @@ export default function (pi: ExtensionAPI) {
 				?.replace(FORMAT_RE, "")
 				.replace(TAIL_RE, "")
 				.trim();
-			const summary = `${FORMAT_NOTE}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
+
+			// 摘要预算：窗口的一半。多轮是整段前置，不设上限的话它最终会吃掉整个窗口，
+			// 而那时 pi 连「有东西可压」都判断不出来（尾巴不超 keepRecentTokens），只能 /new。
+			const window = ctx.model?.contextWindow ?? 200_000;
+			const budget = Math.floor(window * SUMMARY_SHARE) * 4; // token → 字符（pi 用 chars/4）
+			const rounds = prev ? [...splitRounds(prev), body] : [body];
+			const fitted = fitSummary(rounds, budget);
+			if (fitted !== rounds.join("\n\n---\n\n")) {
+				notify(`摘要超出 ${Math.round(SUMMARY_SHARE * 100)}% 窗口预算，已丢弃较早的轮次`, "warning");
+			}
+			const summary = `${FORMAT_NOTE}\n\n${fitted}\n\n---\n${TAIL_NOTE}`;
 
 			return {
 				compaction: {
