@@ -24,6 +24,18 @@ const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
  */
 const MAX_TEXT_CHARS = 60_000;
 
+/**
+ * slice 的分块上限。比 expand 的 60k 略小 —— 每次 slice 还会带 5 行元数据，
+ * 而且要留出继续读的空间，别让一次分块就顶到 expand 的整条上限。
+ */
+const MAX_SLICE_CHARS = 50_000;
+const DEFAULT_SLICE_CHARS = 20_000;
+/** 分块边界向回找换行的最大距离：再远就不值得为对齐牺牲这么多了 */
+const SNAP_WINDOW = 200;
+
+const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
 /** 抽一条消息里的图片块 */
 const imagesOf = (msg: any): { data: string; mimeType: string }[] => {
 	if (!msg || msg.role === "excluded") return [];
@@ -74,6 +86,37 @@ const render = (msg: any, full: boolean): string => {
 	return `[${msg.role}]\n${cut(text(msg.content))}`;
 };
 
+/** 宽松取整：模型传 "40000" / 4e4 / 40000.7 都认，真的不是数字才回 null */
+const intOrNull = (v: unknown): number | null => {
+	const n = typeof v === "string" ? Number(v.trim()) : v;
+	return typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : null;
+};
+
+/** Schema 层也允许数字字符串，否则 "40000" 在进 execute 之前就被挡掉了 */
+const NumLike = (description: string) => Type.Union([Type.Number(), Type.String()], { description });
+
+/**
+ * 切一块 [start, end)。三条硬约束：
+ * 1. start < end <= full.length（`offset < total` 时）—— 否则 next_offset 不前进，模型会死循环；
+ * 2. 尽量不切断行：先向回找换行（最多 SNAP_WINDOW 字符），找不到才处理代理对；
+ * 3. 绝不拆代理对。碰上就向后多拿 1 个码元（即实际可能比 limit 多 1）——
+ *    孤立代理项跨过 JSON / 传输层 / 模型编码可能变成 U+FFFD，宁可多 1 码元也不能伤字；
+ *    向前多拿天然保住约束 1，不需要再为了进展去拆字。
+ */
+const sliceChunk = (full: string, offset: number, limit: number) => {
+	const total = full.length;
+	const start = Math.min(Math.max(0, offset), total);
+	let end = Math.min(start + limit, total);
+	if (end < total) {
+		const nl = full.lastIndexOf("\n", end - 1);
+		if (nl > start && nl >= end - SNAP_WINDOW) end = nl + 1;
+		if (end < total && isHighSurrogate(full.charCodeAt(end - 1)) && isLowSurrogate(full.charCodeAt(end))) end++;
+	}
+	// 兜底：上面的调整只会前移（换行对齐不低于 start，代理对只增不减），保留一行防守避免意外的死循环
+	if (start < total && end <= start) end = Math.min(start + limit, total);
+	return { start, end, total, chunk: full.slice(start, end), hasMore: end < total };
+};
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "recall",
@@ -84,6 +127,10 @@ export default function (pi: ExtensionAPI) {
 			"- expand: [N, ...] — full untruncated text of those entries (a toolCall also returns its paired result).",
 			"- range: [from, to] — entries #from..#to in order, 5 per page.",
 			"- query: keywords — search the whole session, 5 hits per page, ranked.",
+			`- slice: {message: N, offset?, limit?} or {notice: N, offset?, limit?} — one entry's raw text, one chunk at a time (default ${DEFAULT_SLICE_CHARS} chars, max ${MAX_SLICE_CHARS}).`,
+			"",
+			`expand and notices stop at ${MAX_TEXT_CHARS} chars. When that happens they print the exact slice call to continue from. Pass its next_offset back into slice until has_more is false.`,
+			"Only continue if you actually need the rest — re-reading a huge log refills the context compaction just freed.",
 			"expand accepts several numbers at once (batch). Add image: true to get the real image blocks.",
 			"#N is the number shown in summary headers like [user#12] / * read#12 / →#13. Only the current session is searchable.",
 			"Extension-injected notifications (e.g. pi-bg-bash completion / watch output) are not messages, so they have no #N: pass their index in notices to read one in full.",
@@ -98,6 +145,16 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.Number(), { description: "Notification indices (N shown as 'notice#N' in query hits) to return in full. These are custom_message entries and do not have a message #N." }),
 			),
 			page: Type.Optional(Type.Number({ description: "Page number for range or query, 1-based. Default 1." })),
+			slice: Type.Optional(
+				Type.Object({
+					message: Type.Optional(NumLike("Message entry #N (e.g. 42 for [user#42]). Give this or notice, not both.")),
+					notice: Type.Optional(NumLike("Notification index (N in notice#N). Give this or message, not both.")),
+					offset: Type.Optional(NumLike("Character offset to start at (0-based). Default 0. Usually the next_offset from the previous chunk.")),
+					limit: Type.Optional(
+						NumLike(`Max characters to return. Default ${DEFAULT_SLICE_CHARS}, clamped to ${MAX_SLICE_CHARS}.`),
+					),
+				}),
+			),
 			image: Type.Optional(
 				Type.Boolean({
 					description: `Return the actual image attachments of the recalled entries, not just [image png] placeholders. Costs real tokens (a screenshot is often 100+ KB). Max ${MAX_IMAGES} images / ${MAX_IMAGE_BYTES / 1024 / 1024} MB per call.`,
@@ -130,6 +187,66 @@ export default function (pi: ExtensionAPI) {
 
 			const page = Math.max(1, Math.floor(params.page ?? 1));
 
+			const asText = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });
+
+			// slice：单条入口的精确分块读取（offset/limit 都算字符）。
+			// 单独一个参数而不是给 expand 加 offset：expand 一次可以给多个编号、还会自动带 toolResult，
+			// 共享 offset 的话“从哪里开始”根本不知道指谁。
+			if (params.slice && typeof params.slice === "object") {
+				const s = params.slice as any;
+				const hasMsg = s.message !== undefined && s.message !== null;
+				const hasNotice = s.notice !== undefined && s.notice !== null;
+				if (hasMsg && hasNotice) return asText(`give exactly one of slice.message / slice.notice`);
+				if (!hasMsg && !hasNotice) return asText(`give slice.message (#N) or slice.notice (notice#N), plus optional offset / limit`);
+
+				const rawOffset = intOrNull(s.offset);
+				const offset = Math.max(0, rawOffset ?? 0);
+				const rawLimit = intOrNull(s.limit);
+				const asked = rawLimit === null || rawLimit <= 0 ? DEFAULT_SLICE_CHARS : rawLimit;
+				const limit = Math.min(asked, MAX_SLICE_CHARS);
+
+				let label: string;
+				let full: string;
+				let hint: (next: number) => string;
+				if (hasMsg) {
+					const idx = intOrNull(s.message);
+					const msg = idx === null ? undefined : byN.get(idx);
+					if (idx === null || !msg) return asText(`#${s.message}: no such entry`);
+					label = `#${idx}`;
+					full = render(msg, true);
+					hint = (next) => `继续：{"slice":{"message":${idx},"offset":${next}}}`;
+				} else {
+					const idx = intOrNull(s.notice);
+					const x = idx === null ? undefined : byNotice.get(idx);
+					if (idx === null || !x) return asText(`notice#${s.notice}: no such notification`);
+					label = `notice#${idx}`;
+					full = render({ role: "custom", customType: x.customType, content: x.content }, true);
+					hint = (next) => `继续：{"slice":{"notice":${idx},"offset":${next}}}`;
+				}
+
+				const total = full.length;
+				const meta: string[] = [`total_chars: ${total}`, `offset: ${offset}`];
+				if (limit !== asked) meta.push(`limit: ${limit}（你要的 ${asked} 超过上限，已夹到 ${MAX_SLICE_CHARS}）`);
+
+				if (offset > total) {
+					meta.push(`has_more: false`, `offset 超出总长度，最大可用 offset 是 ${total}`);
+					return asText(`${label}\n${meta.join("\n")}\n\n（这条已到末尾，没有更多内容）`);
+				}
+
+				const { chunk, end, hasMore } = sliceChunk(full, offset, limit);
+				const pct = total === 0 ? 100 : Math.floor((end / total) * 100);
+				meta.push(
+					`returned_chars: ${chunk.length}`,
+					`next_offset: ${hasMore ? end : "null"}`,
+					`has_more: ${hasMore}`,
+					`progress: ${pct}%`,
+				);
+				const parts = [`${label}\n${meta.join("\n")}`, `--- CONTENT START ---\n${chunk}\n--- CONTENT END ---`];
+				if (hasMore) parts.push(hint(end));
+				else parts.push("（已到末尾，这条读完了）");
+				return asText(parts.join("\n\n"));
+			}
+
 			// notices：按 notice#N 取单条通知全文
 			if (Array.isArray(params.notices) && params.notices.length > 0) {
 				const chunks: string[] = [];
@@ -141,13 +258,16 @@ export default function (pi: ExtensionAPI) {
 						chunks.push(`notice#${idx}: no such notification`);
 						continue;
 					}
-					const full = `notice#${x.n} [${x.customType}]\n${text(x.content)}`;
+					const full = render({ role: "custom", customType: x.customType, content: x.content }, true);
 					if (full.length <= budget) {
 						budget -= full.length;
-						chunks.push(full);
+						chunks.push(`notice#${x.n}\n${full}`);
 					} else {
-						chunks.push(`${full.slice(0, Math.max(0, budget))}…(+${full.length - Math.max(0, budget)}，超出单次文本上限)`);
+						const take = Math.max(0, budget);
 						budget = 0;
+						chunks.push(
+							`notice#${x.n}\n${full.slice(0, take)}…(+${full.length - take}，超出单次文本上限 ${MAX_TEXT_CHARS} 字符)\n继续：{"slice":{"notice":${x.n},"offset":${take}}}`,
+						);
 					}
 				}
 				return { content: [{ type: "text", text: chunks.join("\n\n---\n\n") }], details: undefined };
@@ -198,14 +318,18 @@ export default function (pi: ExtensionAPI) {
 					if (full.length <= textBudget) {
 						textBudget -= full.length;
 						emit(`${heading}\n${full}`);
-					} else if (textBudget > 0) {
-						// 还能给一部分：截到预算为止
-						emit(`${heading}\n${full.slice(0, textBudget)}…(+${full.length - textBudget}，超出单次文本上限)`);
+					} else {
+						// 截多少就报多少 offset —— 批量 expand 里每条拿到的份额不一样，
+						// 统一报 offset:60000 会让 #42 后面的内容永远读不到。
+						const take = Math.max(0, textBudget);
 						textBudget = 0;
 						truncated++;
-					} else {
-						emit(`${heading}\n（省略 ${full.length} 字符：本次 expand 已达文本上限 ${MAX_TEXT_CHARS} 字符）`);
-						truncated++;
+						const cont = `继续：{"slice":{"message":${n},"offset":${take}}}`;
+						emit(
+							take > 0
+								? `${heading}\n${full.slice(0, take)}…(+${full.length - take}，超出单次文本上限)\n${cont}`
+								: `${heading}\n（省略 ${full.length} 字符：本次 expand 已达文本上限 ${MAX_TEXT_CHARS} 字符）\n${cont}`,
+						);
 					}
 					attach(msg, `#${n}`);
 				};
@@ -231,7 +355,8 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 				if (wantImage && !sawImage) emit("（这些条目里没有图片）");
-				if (truncated > 0) emit(`（${truncated} 条因超出单次文本上限 ${MAX_TEXT_CHARS} 字符而被截断；用更小的 expand 分批取）`);
+				if (truncated > 0)
+					emit(`（${truncated} 条因超出单次文本上限 ${MAX_TEXT_CHARS} 字符而被截断；上面每条都给了继续读的 slice 参数）`);
 				flush();
 				return { content, details: undefined };
 			}
@@ -309,7 +434,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: body + more }], details: undefined };
 			}
 
-			return { content: [{ type: "text", text: "give one of: expand, range, query" }], details: undefined };
+			return asText("give one of: expand, range, query, notices, slice");
 		},
 	});
 }

@@ -25,6 +25,47 @@ async function call(entries: any[], params: any): Promise<{ text: string; blocks
   return { text: r.content.map((c: any) => c.text ?? "").join(""), blocks: r.content };
 }
 
+/** 孤立代理项：真值表示字符串里有不成对的 UTF-16 代理项——过线就可能变成 U+FFFD */
+const hasLoneSurrogate = (s: string) => {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const nx = s.charCodeAt(i + 1);
+      if (!(nx >= 0xdc00 && nx <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) return true;
+  }
+  return false;
+};
+
+const MARK_A = "--- CONTENT START ---\n";
+const MARK_B = "\n--- CONTENT END ---";
+const bodyOf = (t: string) => {
+  const i = t.indexOf(MARK_A);
+  const j = t.lastIndexOf(MARK_B);
+  return i >= 0 && j >= i ? t.slice(i + MARK_A.length, j) : t;
+};
+
+/** 顺着 next_offset 一直读到底，用于验证“拼回来 === 原文” */
+async function sliceAll(entries: any[], params: any, limit = 20_000) {
+  let offset = 0, text = "", calls = 0, monotonic = true;
+  const chunks: string[] = [], offsets: number[] = [];
+  for (;;) {
+    const r = await call(entries, { slice: { ...params, offset, limit } });
+    calls++;
+    chunks.push(bodyOf(r.text));
+    text += chunks[chunks.length - 1];
+    const m = r.text.match(/next_offset: (\d+|null)/);
+    if (!m) throw new Error(`没有 next_offset: ${r.text.slice(0, 200)}`);
+    if (m[1] === "null") return { text, calls, chunks, offsets, monotonic, last: r.text };
+    const next = Number(m[1]);
+    if (next <= offset) monotonic = false;
+    offsets.push(next);
+    offset = next;
+    if (calls > 2000) throw new Error("没读到结尾，可能死循环");
+  }
+}
+
 console.log("[1] query 搜索全文（不是只搜前 800 字符）");
 {
   const lead = "前".repeat(1200);
@@ -122,6 +163,133 @@ console.log("\n[8] 扩展通知：query 能搜到，notices 能取全文，且�
 
   const lim = await call(entries, { notices: [0, 1] });
   check("notices 也受文本预算约束", lim.text.length < 120_000);
+}
+
+console.log(`\n[9] slice：单条无损分块`);
+{
+  const body = Array.from({ length: 3000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n");
+  const entries = [mk("r0", "toolResult", T(body), { toolName: "bash", toolCallId: "tc0" })];
+  const expected = `[toolResult:bash]\n${body}`;
+  const all = await sliceAll(entries, { message: 0 });
+  check("129k 字符分块后拼回 === render 全文", all.text === expected, { got: all.text.length, want: expected.length });
+  check("确实分了多块", all.calls > 1, all.calls);
+  check("offset 每步严格递增", all.monotonic, all.offsets);
+  check("末块 has_more:false 且 next_offset:null", /has_more: false/.test(all.last) && /next_offset: null/.test(all.last), all.last.slice(0, 160));
+  check("末块带“读完了”提示", all.last.includes("已到末尾"));
+
+  const half = await call(entries, { slice: { message: 0, offset: 20_000, limit: 20_000 } });
+  check("返回头含 total/offset/next_offset/has_more",
+    /total_chars: \d+/.test(half.text) && /offset: 20000/.test(half.text) && /next_offset: \d+/.test(half.text) && /has_more: true/.test(half.text), half.text.slice(0, 200));
+  check("给了可执行的继续调用", /继续：\{"slice":\{"message":0,"offset":\d+\}\}/.test(half.text), half.text.slice(-120));
+  check("正文用 CONTENT 包裹", half.text.includes("--- CONTENT START ---") && half.text.includes("--- CONTENT END ---"));
+}
+
+console.log("\n[10] slice：换行对齐 / emoji 边界 / 必须有进展");
+{
+  const body = Array.from({ length: 200 }, (_, i) => `L${i}`).join("\n");
+  const expected = `[user]\n${body}`;
+  const entries = [mk("u0", "user", T(body))];
+  const all = await sliceAll(entries, { message: 0 }, 40);
+  check("小 limit 也能拼回原文", all.text === expected, { got: all.text.length, want: expected.length });
+  check("每块都尽量完整行（不以半个换行结尾）", all.chunks.every((c) => !c.endsWith("L")), all.chunks.slice(0, 3));
+
+  // 全是代理对：不管怎么切，拼回来必须逐字一致
+  const emoji = "😀".repeat(500);
+  const eEntries = [mk("u1", "user", T(emoji))];
+  const eAll = await sliceAll(eEntries, { message: 0 }, 3);
+  check("emoji 消息分块后逐字一致", eAll.text === `[user]\n${emoji}`, eAll.text.length);
+  check("边界没切断代理对", eAll.chunks.every((c) => !/[\uD800-\uDBFF]$/.test(c)), eAll.chunks.slice(0, 3));
+
+  // limit 极小（1）时必然要碰代理对边界，也必须前进、不吐孤立代理项、且拼回一致
+  const tiny = await sliceAll(eEntries, { message: 0 }, 1);
+  check("limit:1 不死循环且有进展", tiny.calls > 100 && tiny.monotonic, tiny.calls);
+  check("limit:1 拼回仍逐字一致", tiny.text === `[user]\n${emoji}`, tiny.text.length);
+  check("limit:1 也不吐孤立代理项", tiny.chunks.every((c) => !hasLoneSurrogate(c)), tiny.chunks.slice(0, 3));
+  check("所有分块都不含孤立代理项", [...all.chunks, ...eAll.chunks].every((c) => !hasLoneSurrogate(c)));
+
+  // 为了不拆代理对，实际返回可能比 limit 多 1 个码元，但不会更多
+  const one = await call(eEntries, { slice: { message: 0, offset: 7, limit: 1 } });
+  check("碰 emoji 边界时只多拿 1 个码元", one.text.includes("returned_chars: 2"), one.text.slice(0, 140));
+  check("limit:40 的分块最多多 1 个码元", all.chunks.every((c) => c.length <= 41), Math.max(...all.chunks.map((c) => c.length)));
+}
+
+console.log("\n[11] slice：参数容错与边界");
+{
+  const entries = [
+    mk("r0", "toolResult", T("0123456789".repeat(10)), { toolName: "bash", toolCallId: "tc0" }),
+    mk("cm0", "custom", []), // 占号，不影响
+  ];
+  const total = `[toolResult:bash]\n${"0123456789".repeat(10)}`.length;
+  check("数字字符串也被接受", (await call(entries, { slice: { message: "0", offset: "10", limit: "5" } })).text.includes("offset: 10"));
+  check("小数向下取整", (await call(entries, { slice: { message: 0, offset: 4.9 } })).text.includes("offset: 4"));
+  check("负数 offset 夹到 0", (await call(entries, { slice: { message: 0, offset: -50 } })).text.includes("offset: 0"));
+  const clamped = await call(entries, { slice: { message: 0, limit: 999_999 } });
+  check("limit 被夹到 50000 并说明", clamped.text.includes("已夹到 50000"), clamped.text.slice(0, 200));
+  const zero = await call(entries, { slice: { message: 0, limit: 0 } });
+  check("limit:0 用默认值而不是空块", /returned_chars: (?!0$)\d+/.test(zero.text), zero.text.slice(0, 200));
+  const atEnd = await call(entries, { slice: { message: 0, offset: total } });
+  check("offset === total：空内容 + has_more:false", atEnd.text.includes("returned_chars: 0") && atEnd.text.includes("has_more: false"), atEnd.text.slice(0, 200));
+  const past = await call(entries, { slice: { message: 0, offset: total + 99 } });
+  check("offset 越界有明确提示", past.text.includes("超出总长度") && past.text.includes("has_more: false"), past.text.slice(0, 200));
+  check("编号不存在报 no such entry", (await call(entries, { slice: { message: 999 } })).text.includes("no such entry"));
+  check("notice 不存在报 no such notification", (await call(entries, { slice: { notice: 7 } })).text.includes("no such notification"));
+  check("message 和 notice 同时给要报错", (await call(entries, { slice: { message: 0, notice: 0 } })).text.includes("exactly one"));
+  check("都不给要报错", (await call(entries, { slice: {} })).text.includes("give slice.message"));
+}
+
+console.log("\n[12] slice：!! 命令不泄漏，图片不重复吐");
+{
+  const entries = [
+    mk("b1", "bashExecution", [], { command: "cat ~/.ssh/id_rsa", output: "PRIVATE KEY".repeat(100), exitCode: 0, cancelled: false, truncated: false, excludeFromContext: true, timestamp: 0 }),
+  ];
+  const out = await call(entries, { slice: { message: 0, limit: 50_000 } });
+  check("slice 拿不到 !! 的内容", !out.text.includes("PRIVATE KEY"), out.text.slice(0, 200));
+  check("slice 也不报 no such entry（占号但内容排除）", !out.text.includes("no such entry"), out.text.slice(0, 120));
+
+  const imgEntries = [mk("r1", "toolResult", [{ type: "image", data: "a".repeat(500), mimeType: "image/png" }], { toolName: "read", toolCallId: "tc1" })];
+  const imgOut = await call(imgEntries, { slice: { message: 0 } });
+  check("slice 只给图片占位符，不带图块", imgOut.blocks.every((b: any) => b.type !== "image") && imgOut.text.includes("[image png]"), imgOut.text.slice(0, 120));
+}
+
+console.log("\n[13] 截断提示必须精确到具体条目、且可执行");
+{
+  const bodies = ["A".repeat(20_000), "B".repeat(20_000), "C".repeat(20_000)];
+  const entries = bodies.map((b, i) => mk(`r${i}`, "toolResult", T(b), { toolName: "bash", toolCallId: `tc${i}` }));
+  const fulls = bodies.map((b) => `[toolResult:bash]\n${b}`);
+  const out = await call(entries, { expand: [0, 1, 2] });
+  const usedByFirstTwo = fulls[0].length + fulls[1].length;
+  const wantOffset = 60_000 - usedByFirstTwo;
+  check("#2 的提示用自己的编号和已给字符数", out.text.includes(`{"slice":{"message":2,"offset":${wantOffset}}}`), { wantOffset, tail: out.text.slice(-300) });
+  check("提示可执行：按它取下一块，正好接上",
+    (await call(entries, { slice: { message: 2, offset: wantOffset, limit: 20_000 } })).text.includes(fulls[2].slice(wantOffset, wantOffset + 50)));
+  check("批量截断汇总不再建议“更小的 expand”", !out.text.includes("更小的 expand"), out.text.slice(-200));
+
+  // 自动配对的 toolResult 用自己的 #N
+  const paired = [
+    { id: "a0", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "tc9", name: "bash", arguments: { command: "deploy" } }] } },
+    mk("r9", "toolResult", T("Z".repeat(100_000)), { toolName: "bash", toolCallId: "tc9" }),
+  ];
+  const pOut = await call(paired, { expand: [0] });
+  check("配对结果用自己的 #1", pOut.text.includes(`{"slice":{"message":1,"offset":`), pOut.text.slice(-260));
+
+  const nEntries = [
+    mk("u0", "user", T("hi")),
+    { id: "cm1", type: "custom_message", customType: "pi-bg-bash-output", content: "Q".repeat(100_000), display: true },
+  ];
+  const nOut = await call(nEntries, { notices: [0] });
+  check("notices 截断提示指向 slice.notice", nOut.text.includes(`{"slice":{"notice":0,"offset":60000}}`), nOut.text.slice(-160));
+  const nAll = await sliceAll(nEntries, { notice: 0 });
+  check("notice 也能分块读完", nAll.text === `[pi-bg-bash-output notice]\n${"Q".repeat(100_000)}`, nAll.text.length);
+}
+
+console.log("\n[14] 追加新消息后旧编号仍可 slice");
+{
+  const body = "0123456789" + "K".repeat(200);
+  const entries = [mk("u0", "user", T(body))];
+  const before = await call(entries, { slice: { message: 0, offset: 100, limit: 50 } });
+  entries.push(mk("u1", "user", T("后面加的")));
+  const after = await call(entries, { slice: { message: 0, offset: 100, limit: 50 } });
+  check("追加消息后同一 offset 返回同一内容", before.text.replace(/progress: \d+%/, "") === after.text.replace(/progress: \d+%/, ""));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

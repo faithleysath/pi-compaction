@@ -224,6 +224,8 @@ M src/auth/session.ts
 { "expand": [3], "image": true }
 { "range": [10, 20] }
 { "query": "rotateRefreshToken" }
+{ "slice": { "message": 42, "offset": 60000 } }
+{ "slice": { "notice": 5, "offset": 0, "limit": 20000 } }
 ```
 
 - `expand`：按编号取全文，`toolCall` 会顺手把配对的结果一起带出来
@@ -232,6 +234,10 @@ M src/auth/session.ts
   上限 6 张 / 6 MB
 - `range`：区间，5 条一页
 - `query`：全会话关键词检索，BM25 风格打分
+- `slice`：单条的精确分块读取（`offset` / `limit` 都算字符）。`expand` 和 `notices`
+  被 60k 上限截断时，会直接给出这一条该用的 `slice` 调用（含**它自己**的编号和已给到的
+  offset）；照着返回头里的 `next_offset` 一路跟到 `has_more: false`，拼起来就是完整原文。
+  分块边界尽量对齐换行，且绝不拆代理对——碰上 emoji 边界时实际返回可能比 `limit` 多 1 个码元。
 
 编号规则：**会话里第 N 个 `type === "message"` 条目**，append-only、永不复用，
 跨压缩轮次和 fork 分支都稳定。
@@ -280,8 +286,9 @@ yaml frontmatter、`git diff` 里也有 `---`，一旦命中，一条工具结�
   压缩 hook 根本不会被调用 —— 这时只能 `/new`。本机 1M 窗口、工具输出 3000 字/条的实测：
   35 次压缩之后进入这个状态（用旧的「保留 20 条」策略是 19 次）。
 - **monorepo 子目录不支持**。pi 的 git 源只能指向仓库根目录。
-- **`recall` 有资源上限**：单次最多 6 张图 / 6 MB，文本 60k 字符。超了会截断并提示，
-  用更小的 `expand` 分批取。
+- **`recall` 有资源上限**：单次最多 6 张图 / 6 MB，文本 60k 字符。`expand` / `notices`
+  超了会截断，并给出该条专用的 `slice` 参数，继续读用 `slice`（单次最多 50k 字符），
+  不是「用更小的 expand 再试」—— 单条超过 60k 时后者根本读不完。
 
 ## 测试
 
