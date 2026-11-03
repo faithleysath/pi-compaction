@@ -26,9 +26,6 @@ pi install git:github.com/faithleysath/pi-compaction
 
 需要 pi ≥ 0.74（见 `package.json` 的 `peerDependencies`）。
 
-> [!IMPORTANT]
-> 装完删掉 `~/.pi/agent/extensions/` 里同名的手工副本，否则会加载两遍。
-
 确认生效：下一次压缩（自动阈值或 `/compact`）之后，摘要第一行是
 `Format: a line starting with [user#N]…`，而不是一段自然语言。
 
