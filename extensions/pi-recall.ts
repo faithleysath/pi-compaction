@@ -133,6 +133,7 @@ export default function (pi: ExtensionAPI) {
 			`- slice: {message: N, offset?, limit?} or {notice: N, offset?, limit?} — one entry's raw text, one chunk at a time (default ${DEFAULT_SLICE_CHARS} chars, max ${MAX_SLICE_CHARS}).`,
 			"",
 			`expand and notices stop at ${MAX_TEXT_CHARS} chars. When that happens they print the exact slice call to continue from. Pass its next_offset back into slice until has_more is false.`,
+			"Use the next_offset value as given — do not compute your own offsets. Chunks are aligned to line and emoji boundaries, so hand-computed offsets drift and skip text.",
 			"Only continue if you actually need the rest — re-reading a huge log refills the context compaction just freed.",
 			"expand accepts several numbers at once (batch). Add image: true to get the real image blocks.",
 			"#N is the number shown in summary headers like [user#12] / * read#12 / →#13. Only the current session is searchable.",
