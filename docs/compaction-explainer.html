@@ -1021,7 +1021,7 @@ const STEPS = [
       "<b>关键改动</b>：先剥掉旧摘要自己的格式说明和尾注，再用 <code>collapseToolBlocks</code> 把里面的 <code>* 工具#N</code> / <code>→#N</code> 连续块合并成一行 <code>(collapsed 7 tool calls #2–#8)</code>。",
       "<b>用户消息和助手正文一字不动</b>，只有工具细节被折叠。折叠行带编号范围，模型可以 <code>recall range:[2,8]</code> 把原文取回来。",
       "<b>只有最新一轮保留完整细节</b>：本次刚渲染好的 <code>body</code> 不折叠，折的是 <code>previousSummary</code>。",
-      "对比：6 轮压缩后摘要 11,616 → 3,744 字符（<b>-68%</b>）；一直聊到摘要吃满 1M 窗口，压缩次数从 180 次变 764 次。开关是 <code>collapseOldTools</code>，默认开。",
+      "对比：6 轮压缩后摘要 12,255 → 4,182 字符（<b>-66%</b>）；1M 窗口按同样增量外推，压缩次数从 84 次变 197 次。开关是 <code>collapseOldTools</code>，默认开。",
       "<b>折叠不能吞掉后台任务</b>：<code>Started background task bg-1</code> 就在被折掉的工具结果里，抹掉它模型就不知道还有任务在跑。所以折叠后补一行 <code>[background] bg-1 started: npm run build (check status with bash_tasks)</code>。",
       "<code>pi-bg-bash</code> 的通知（<code>custom_message</code>）走另一条路：旧轮次的压成一行 <code>[background] bg-3 output batch ×N</code>，日志用 <code>bash_output</code> 取；当前轮次的保留头部（id / 状态 / 命令）+ 头尾截断。"
     ],

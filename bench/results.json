@@ -1,0 +1,131 @@
+{
+  "windowTokens": 1000000,
+  "reserveTokens": 16384,
+  "keepRecentTokens": 20000,
+  "short": {
+    "turnsPerRound": 1,
+    "toolsPerTurn": 3,
+    "rounds": 6,
+    "results": [
+      {
+        "collapseOldTools": false,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 2436,
+            "markers": 1
+          },
+          {
+            "round": 2,
+            "chars": 4395,
+            "markers": 1
+          },
+          {
+            "round": 3,
+            "chars": 6360,
+            "markers": 1
+          },
+          {
+            "round": 4,
+            "chars": 8325,
+            "markers": 1
+          },
+          {
+            "round": 5,
+            "chars": 10290,
+            "markers": 1
+          },
+          {
+            "round": 6,
+            "chars": 12255,
+            "markers": 1
+          }
+        ]
+      },
+      {
+        "collapseOldTools": true,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 2436,
+            "markers": 1
+          },
+          {
+            "round": 2,
+            "chars": 2783,
+            "markers": 2
+          },
+          {
+            "round": 3,
+            "chars": 3135,
+            "markers": 3
+          },
+          {
+            "round": 4,
+            "chars": 3484,
+            "markers": 4
+          },
+          {
+            "round": 5,
+            "chars": 3833,
+            "markers": 5
+          },
+          {
+            "round": 6,
+            "chars": 4182,
+            "markers": 6
+          }
+        ]
+      }
+    ]
+  },
+  "cycle": {
+    "turnsPerRound": 55,
+    "toolsPerTurn": 1,
+    "rounds": 2,
+    "results": [
+      {
+        "collapseOldTools": false,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 45873,
+            "markers": 1
+          },
+          {
+            "round": 2,
+            "chars": 91404,
+            "markers": 1
+          }
+        ]
+      },
+      {
+        "collapseOldTools": true,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 45873,
+            "markers": 1
+          },
+          {
+            "round": 2,
+            "chars": 65208,
+            "markers": 56
+          }
+        ]
+      }
+    ],
+    "growthPerRound": [
+      45531,
+      19335
+    ],
+    "compactions": [
+      84,
+      197
+    ],
+    "turns": [
+      4620,
+      10835
+    ]
+  }
+}

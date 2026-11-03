@@ -10,7 +10,7 @@ pi 默认把切点之前的对话交给模型写摘要；这个包把同一段�
 |---|---|---|
 | 压缩时调用模型 | 是 | 否 |
 | 摘要内容 | 模型自由发挥 | 固定规则，同样的输入得到同样的摘要 |
-| 多轮压缩 | 摘要随轮次线性增长 | 旧轮次的工具细节折叠，6 轮实测省 68% |
+| 多轮压缩 | 摘要随轮次线性增长 | 旧轮次的工具细节折叠，6 轮实测省 66% |
 | 找回原文 | 无 | `recall` 按 `#N` 取，支持图片 |
 
 **不适用**：想要「模型重新总结过的、更聪明的摘要」。这里没有概括，只有规则渲染。
@@ -96,19 +96,19 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 - 行内带编号范围，`recall range: [2, 10]` 就能取回原文
 - 只有最新一轮保留完整细节
 
-摘要大小实测（同一组对话，关闭 / 开启各跑一遍）：
+摘要大小实测（`bun run bench`，同一组固定会话，关闭 / 开启各跑一遍）：
 
 | 轮次 | `collapseOldTools: false` | `true` | 省 |
 |---|---|---|---|
-| 1 | 1,723 | 1,723 | 0% |
-| 2 | 3,700 | 2,388 | 35% |
-| 3 | 5,679 | 2,727 | 52% |
-| 4 | 7,658 | 3,066 | 60% |
-| 5 | 9,637 | 3,405 | 65% |
-| 6 | 11,616 | 3,744 | 68% |
+| 1 | 2,436 | 2,436 | 0% |
+| 2 | 4,395 | 2,783 | 37% |
+| 3 | 6,360 | 3,135 | 51% |
+| 4 | 8,325 | 3,484 | 58% |
+| 5 | 10,290 | 3,833 | 63% |
+| 6 | 12,255 | 4,182 | 66% |
 
 关闭后摘要按轮次线性增长；开启后基本只随「用户消息 + 助手正文」增长，工具细节不再累积。
-折叠算法、死锁点实验（180 → 764 次压缩）和真实会话数据在[设计细节](docs/design.md)。
+折叠算法、完整周期的外推（84 → 197 次压缩）在 [bench/README.md](bench/README.md) 和[设计细节](docs/design.md)。
 
 ## 参数
 
@@ -217,11 +217,12 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
   通知等）不是 `message` 类型，不占号，只能靠 `notice#N` 查。
 - **不保证无限压缩**。摘要每轮把上一轮的整段文本前置进来，所以第 N 轮的摘要 = 前 N−1 轮
   全部内容 + 本轮新折叠的。压缩后的上下文恒定是「1 条 system + 1 条摘要 + 约 keepRecentTokens
-  的原始消息」，涨的只有摘要那一条。实测每轮约 +770 字节（消息很短时），真实会话里约 6–10 KB/轮。
+  的原始消息」，涨的只有摘要那一条。每轮增量取决于内容：bench 的短轮次是折叠后
+  +349 字符 / 不折叠 +1,965 字符。
 - **摘要占满窗口后 pi 不会再调压缩**。摘要涨到「窗口 − reserveTokens − 尾巴」这个规模时，
   pi 的 `prepareCompaction` 会因为「保留尾巴没超过 keepRecentTokens」返回 undefined，
-  压缩 hook 根本不会被调用 —— 这时只能 `/new`。在 1M 窗口、工具输出约 3000 字/条的模拟会话里，
-  第 35 次压缩之后进入这个状态（早期按固定 20 条保留的版本是 19 次）。
+  压缩 hook 根本不会被调用 —— 这时只能 `/new`。bench 的完整周期 workload（1M 窗口、
+  每轮 55 个 turn）外推：不折叠约 84 次、折叠约 197 次压缩后进入这个状态，见 [bench/README.md](bench/README.md)。
 - **monorepo 子目录不支持**。pi 的 git 源只能指向仓库根目录。
 
 ## 原理
@@ -238,6 +239,8 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 bun install
 bun run test        # 90 + 61 项，直接调真实 handler，不经过 pi 进程
 bun run typecheck
+bun run bench       # 摘要大小 / 1M 窗口外推，见 bench/README.md
+bun run bench:check # 和 bench/results.json 比对，防数字漂移
 bun run test:e2e    # 可选：真模型、真 pi 进程，花钱
 ```
 
@@ -253,6 +256,9 @@ extensions/pi-recall.ts          recall 工具：expand / range / query / slice
 tests/compaction.test.ts         压缩产物测试（90 项）
 tests/recall.test.ts             召回测试（61 项）
 tests/e2e/                       真模型 E2E，默认不跑
+bench/compaction.ts              摘要大小 / 压缩次数 benchmark
+bench/README.md                  固定 workload、当前结果、怎么重跑
+bench/results.json               基准结果，bench:check 用它防漂移
 docs/design.md                   实现细节、实测数据、设计取舍
 docs/compaction-explainer.html   单文件动画解说（14 步）
 ```

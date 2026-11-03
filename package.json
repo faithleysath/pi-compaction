@@ -27,7 +27,10 @@
   "scripts": {
     "test": "bun run tests/compaction.test.ts && bun run tests/recall.test.ts",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "bun run tests/e2e/run.ts"
+    "test:e2e": "bun run tests/e2e/run.ts",
+    "bench": "bun run bench/compaction.ts",
+    "bench:check": "bun run bench/compaction.ts --check",
+    "bench:update": "bun run bench/compaction.ts --write"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
