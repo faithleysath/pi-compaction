@@ -154,6 +154,7 @@
   .sumline.fmtnote{color:#6b7788; font-style:italic; border-left:2px solid #2a3341; padding-left:7px}
   .sumline.fmtnote.on{max-height:80px}
   .sumline .foldmark{color:#c084fc; background:#241a2e; border-radius:4px; padding:1px 6px; display:inline-block}
+  .sumline .foldbg{color:#7dd3fc; background:#132a33; border-radius:4px; padding:1px 6px; display:inline-block}
   .keptcard{max-height:0; opacity:0; overflow:hidden; border-width:0; padding:0; transition:max-height .5s, opacity .45s, border-width .2s}
   .keptcard.on{max-height:460px; opacity:1; border-width:1px}
   .keptcard .card-b{max-height:0; opacity:0; padding-top:0; padding-bottom:0; transition:max-height .5s, opacity .4s, padding .4s}
@@ -762,29 +763,35 @@ const ENTRIES = [
     tool:{ name:"write", args:'{"path":"tests/auth-refresh.test.ts","content":"…"}', resLen:120 } },
   { id:"m8", g:124, role:"toolResult", name:"write", resLen:120, text:"Wrote 1 file: tests/auth-refresh.test.ts" },
   { id:"m8b",g:125, role:"assistant", think:"用例写好了，覆盖 reset 之后 refresh 要轮换", text:"用例写好了：reset 之后 refresh 必须轮换" },
-  { id:"m9", g:126, role:"assistant", think:"跑测试", text:"跑一下", tool:{ name:"bash", args:'{"command":"bun test tests/auth-refresh.test.ts"}', resLen:830 } },
-  { id:"m10",g:126, role:"toolResult", name:"bash", resLen:830, text:"bun test v1.4.3\n✓ reset rotates refresh token (12ms)\n… 14 passed" },
+  { id:"m8c",g:126, role:"assistant", think:"顺手起个后台跑全量测试", text:"后台跑一遍全量测试",
+    tool:{ name:"bash", args:'{"command":"bun test","background":true}', resLen:180 } },
+  { id:"m8d",g:127, role:"toolResult", name:"bash", resLen:180, bg:{ id:"bg-7", cmd:"bun test" },
+    text:"Started background task bg-7. Its completion is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of sleeping or polling." },
+  { id:"cm1", g:null, role:"custom", customType:"pi-bg-bash",
+    text:"Background task bg-7 finished: exited (code 0), ran 2m 4s.\nCommand: bun test\nLast output, cut to the last 20 lines or 4 KiB; `bash_output bg-7` reads it all:\n" + Array.from({length:16},(_,i)=>"✓ 用例 " + (i+1) + " passed (12ms)").join("\n") },
+  { id:"m9", g:128, role:"assistant", think:"跑测试", text:"跑一下", tool:{ name:"bash", args:'{"command":"bun test tests/auth-refresh.test.ts"}', resLen:830 } },
+  { id:"m10",g:128, role:"toolResult", name:"bash", resLen:830, text:"bun test v1.4.3\n✓ reset rotates refresh token (12ms)\n… 14 passed" },
   /* ── 下面这段是一串例行巡检，用来把「被折叠的那半」撑出足够的内容 ── */
-  { id:"m11",g:127, role:"assistant", think:"顺手看下 CI 和依赖", text:"顺便看下 CI",
+  { id:"m11",g:129, role:"assistant", think:"顺手看下 CI 和依赖", text:"顺便看下 CI",
     tool:{ name:"bash", args:'{"command":"gh run list --limit 5"}', resLen:640 } },
-  { id:"m12",g:128, role:"toolResult", name:"bash", resLen:640, text:"✓ build  1m02s\n✓ test   2m14s\n✓ lint   18s" },
-  { id:"m13",g:129, role:"assistant",    text:"CI 绿的", tool:{ name:"bash", args:'{"command":"bun outdated"}', resLen:420 } },
-  { id:"m14",g:130, role:"toolResult", name:"bash", resLen:420, text:"zod  3.22.4 → 3.23.8\nhono 4.0.1 → 4.1.3" },
-  { id:"m15",g:131, role:"user",         text:"把 docker 里的 api 也重启一下" },
-  { id:"m16",g:132, role:"assistant",    text:"好", tool:{ name:"bash", args:'{"command":"docker compose restart api"}', resLen:96 } },
-  { id:"m17",g:133, role:"toolResult", name:"bash", resLen:96, text:"Container api  Restarted" },
-  { id:"m18",g:134, role:"assistant", think:"确认起来了", text:"起来了", tool:{ name:"bash", args:'{"command":"curl -s localhost:3000/health"}', resLen:48 } },
-  { id:"m19",g:135, role:"toolResult", name:"bash", resLen:48, text:'{"ok":true,"uptime":3}' },
-  { id:"m20",g:136, role:"user",         text:"再看下日志里有没有 500" },
-  { id:"m21",g:137, role:"assistant",    text:"查一下", tool:{ name:"bash", args:'{"command":"docker compose logs api --since 10m | grep 500"}', resLen:1200 } },
-  { id:"m22",g:138, role:"toolResult", name:"bash", resLen:1200, text:"api  | POST /auth/reset 500\napi  | TypeError: cannot read 'token' of undefined\n… exit code 1" },
-  { id:"m23",g:139, role:"assistant", think:"还是 reset 那条路径", text:"还是 reset 那条路径没修干净", tool:{ name:"read", args:'{"path":"src/auth/reset.ts","offset":1,"limit":200}', resLen:1800 } },
-  { id:"m24",g:140, role:"toolResult", name:"read", resLen:1800, text:"export async function resetPassword(...) {\n  const user = await findUser(token)\n  … 1800 字符" },
-  { id:"m25",g:141, role:"assistant", think:"这里根本没判空", text:"这里没判空，补上", tool:{ name:"edit", args:'{"path":"src/auth/reset.ts","oldText":"…","newText":"…"}', resLen:186 } },
-  { id:"m26",g:142, role:"toolResult", name:"edit", resLen:186, text:"Successfully replaced 1 block in src/auth/reset.ts" },
-  { id:"m27",g:143, role:"user",         text:"再跑一次测试确认" },
-  { id:"m28",g:144, role:"assistant",    text:"跑", tool:{ name:"bash", args:'{"command":"bun test"}', resLen:830 } },
-  { id:"m29",g:145, role:"toolResult", name:"bash", resLen:830, text:"bun test v1.4.3\n✓ reset rotates refresh token\n✓ reset rejects unknown token\n… 16 passed" },
+  { id:"m12",g:130, role:"toolResult", name:"bash", resLen:640, text:"✓ build  1m02s\n✓ test   2m14s\n✓ lint   18s" },
+  { id:"m13",g:131, role:"assistant",    text:"CI 绿的", tool:{ name:"bash", args:'{"command":"bun outdated"}', resLen:420 } },
+  { id:"m14",g:132, role:"toolResult", name:"bash", resLen:420, text:"zod  3.22.4 → 3.23.8\nhono 4.0.1 → 4.1.3" },
+  { id:"m15",g:133, role:"user",         text:"把 docker 里的 api 也重启一下" },
+  { id:"m16",g:134, role:"assistant",    text:"好", tool:{ name:"bash", args:'{"command":"docker compose restart api"}', resLen:96 } },
+  { id:"m17",g:135, role:"toolResult", name:"bash", resLen:96, text:"Container api  Restarted" },
+  { id:"m18",g:136, role:"assistant", think:"确认起来了", text:"起来了", tool:{ name:"bash", args:'{"command":"curl -s localhost:3000/health"}', resLen:48 } },
+  { id:"m19",g:137, role:"toolResult", name:"bash", resLen:48, text:'{"ok":true,"uptime":3}' },
+  { id:"m20",g:138, role:"user",         text:"再看下日志里有没有 500" },
+  { id:"m21",g:139, role:"assistant",    text:"查一下", tool:{ name:"bash", args:'{"command":"docker compose logs api --since 10m | grep 500"}', resLen:1200 } },
+  { id:"m22",g:140, role:"toolResult", name:"bash", resLen:1200, text:"api  | POST /auth/reset 500\napi  | TypeError: cannot read 'token' of undefined\n… exit code 1" },
+  { id:"m23",g:141, role:"assistant", think:"还是 reset 那条路径", text:"还是 reset 那条路径没修干净", tool:{ name:"read", args:'{"path":"src/auth/reset.ts","offset":1,"limit":200}', resLen:1800 } },
+  { id:"m24",g:142, role:"toolResult", name:"read", resLen:1800, text:"export async function resetPassword(...) {\n  const user = await findUser(token)\n  … 1800 字符" },
+  { id:"m25",g:143, role:"assistant", think:"这里根本没判空", text:"这里没判空，补上", tool:{ name:"edit", args:'{"path":"src/auth/reset.ts","oldText":"…","newText":"…"}', resLen:186 } },
+  { id:"m26",g:144, role:"toolResult", name:"edit", resLen:186, text:"Successfully replaced 1 block in src/auth/reset.ts" },
+  { id:"m27",g:145, role:"user",         text:"再跑一次测试确认" },
+  { id:"m28",g:146, role:"assistant",    text:"跑", tool:{ name:"bash", args:'{"command":"bun test"}', resLen:830 } },
+  { id:"m29",g:147, role:"toolResult", name:"bash", resLen:830, text:"bun test v1.4.3\n✓ reset rotates refresh token\n✓ reset rejects unknown token\n… 16 passed" },
 ];
 /* 全局编号自动重排：type==="message" 的条目都占号（含 system），meta 不是 message 不占号 */
 { let g = 117; for (const e of ENTRIES) if (e.role !== "meta") e.g = g++; }
@@ -826,7 +833,7 @@ const keptTok = visibleIdx.slice(snappedCut).reduce((a, i) => a + approxTok(byId
 
 /* 渲染后的文本行：直接从被折叠区生成，规则和 pi-compaction.ts 的 render() 一致 */
 const CHIP = g => `<span class="chip" data-g="${g}">#${g}</span>`;
-const CFG_TOOL_ARGS = 300, CFG_RES_HEAD = 200, CFG_RES_TAIL = 100;
+const CFG_TOOL_ARGS = 300, CFG_RES_HEAD = 200, CFG_RES_TAIL = 100, CFG_CUSTOM_HEAD = 4;
 function clipH(s, n){ return s.length <= n ? s : `${s.slice(0,n)}<span class="cut-ell">…(+${s.length-n})</span>`; }
 function clipHT(s, head, tail){
   if (s.length <= head + tail) return s;
@@ -848,7 +855,17 @@ for (let v = 0; v < snappedCut; v++) {
     if (e.text) RENDERED.push({ grp:1, html:`<span class="k">[assistant${k}]</span>\n${esc(escBody(e.text))}` });
     if (e.tool) RENDERED.push({ grp:2, html:`<span class="c">*</span> ${esc(e.tool.name)}${k} ${clipH(esc(escBody(e.tool.args)), CFG_TOOL_ARGS)}` });
   } else if (e.role === "toolResult") {
-    RENDERED.push({ grp:2, html:`<span class="r">→</span>${k} ${clipHT(esc(escBody(e.text)), CFG_RES_HEAD, CFG_RES_TAIL)}` });
+    if (e.bg) {
+      RENDERED.push({ grp:2, bg:e.bg, html:`<span class="r">→</span>${k} Started background task ${e.bg.id}（cmd: ${esc(e.bg.cmd)}）（完成时自动通知，别轮询）` });
+    } else {
+      RENDERED.push({ grp:2, html:`<span class="r">→</span>${k} ${clipHT(esc(escBody(e.text)), CFG_RES_HEAD, CFG_RES_TAIL)}` });
+    }
+  } else if (e.role === "custom") {
+    // 头部 CUSTOM_HEAD_LINES 行原样，正文头+尾截断
+    const lines = e.text.split("\n");
+    const head = lines.slice(0, CFG_CUSTOM_HEAD).join("\n");
+    const rest = lines.slice(CFG_CUSTOM_HEAD).join("\n");
+    RENDERED.push({ grp:1, custom:true, html:`<span class="k">[user]</span>\n${esc(head)}\n${clipHT(esc(rest), CFG_RES_HEAD, CFG_RES_TAIL)}` });
   }
 }
 
@@ -867,6 +884,11 @@ const RENDERED_FOLDED = (() => {
     if (!calls) { for (const h of run) out.push({ grp: 2, html: h }); run = null; return; }
     const lo = Math.min(...nums), hi = Math.max(...nums);
     out.push({ grp: 2, html: `<span class="foldmark">（调用工具 ${calls} 次 ${lo === hi ? "#" + lo : "#" + lo + "–#" + hi}）</span>` });
+    // 被折掉的工具结果里有后台任务启动 → 补一行记录，否则模型不知道还有任务在跑
+    for (const h of run) {
+      const m = h.match(/Started background task (\S+?)（cmd: (.*?)）/);
+      if (m) out.push({ grp: 2, html: `<span class="foldbg">[background]</span> ${m[1]} 启动：${m[2]}（状态用 bash_tasks 查）` });
+    }
     run = null;
   };
   for (const d of RENDERED) {
@@ -964,6 +986,17 @@ const STEPS = [
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; if (byId[ENTRIES[i].id].role === "bashExec") return "ghost"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },
     tokens:70, cutAt:snappedCut, renderRows:"all", renderGroup:2
+  },
+  {
+    title:"后台任务：命令用 toolCallId 绑，启动结果要三重校验",
+    bullets:[
+      "<code>bash</code> 带 <code>background: true</code> 时，结果整段就是一句 <code>Started background task bg-7. …</code> —— 后面还有 190 字符「别轮询」的提示，折叠后毫无价值。这里改写成一行，顺手把命令绑上去：<code>→#N Started background task bg-7（cmd: bun test）（完成时自动通知，别轮询）</code>。",
+      "<b>命令必须用 <code>toolCallId</code> 查，不能按位置配</b>。并行调用里 <code>read</code> 没有 <code>command</code>，但它的结果照样占一个位置；结果顺序也不保证和调用顺序一致。位置配对会把 <code>npm run build</code> 安到 <code>npm test</code> 头上。",
+      "<b>识别要过三重校验</b>，缺一不可：① 工具是 <code>bash</code> ② 那次调用确实带 <code>background: true</code> ③ 结果<b>整段</b>就是那句话（<code>^</code> 锚点 + 必须带句点）。只匹配子串的话，<code>read</code> 读一份讲这个 bug 的文档、<code>grep</code> 命中日志，整份文件内容都会被替换成一行记录。",
+      "别的扩展注入的通知（<code>custom_message</code>）走另一套：<b>头部 " + CFG_CUSTOM_HEAD + " 行原样保留</b>（任务 ID / 状态 / 命令 / <code>seq_through</code> 都在头几行），正文按工具结果那套头+尾截断。实测 3 条 <code>pi-bg-bash</code> 通知 9,457 → 1,227 字符（<b>-87%</b>）；<code>bash_watch</code> 的 32 KiB 批次同理。"
+    ],
+    state(i){ const e = byId[ENTRIES[i].id]; if (e.role === "meta" || e.role === "system") return "drop"; return "sum"; },
+    tokens:70, cutAt:snappedCut, renderRows:"all", renderGroup:2, focusCustom:true
   },
   {
     title:"拼起来，开头加一行格式说明",
@@ -1066,6 +1099,7 @@ function rawHTML(e){
     system:['t-sys','system'], meta:['t-sys','meta'], user:['t-user','user'],
     bashExec:['t-user','! cmd'],
     assistant:['t-assistant','assistant'], toolResult:['t-result', e.name || 'result'],
+    custom:['t-user', e.customType || 'custom_message'],
   }[e.role] || ['t-sys', e.role];
   let h = `<span class="tag ${badge[0]}">${badge[1]}</span>`;
   if (e.role === "assistant") {
@@ -1076,6 +1110,8 @@ function rawHTML(e){
     h += `<div class="txt">${esc(e.text)}</div><div class="meta">${e.resLen} chars</div>`;
   } else if (e.role === "bashExec") {
     h += `<div class="txt mono">$ ${esc(e.command)}</div><div class="txt" style="margin-top:4px">${esc(e.output)}</div>`;
+  } else if (e.role === "custom") {
+    h += `<div class="txt">${esc(e.text)}</div><div class="meta">customType:"${esc(e.customType)}" · 不占 #N</div>`;
   } else {
     h += `<div class="txt${e.role==='meta'?' mono':''}">${esc(e.text)}</div>`;
   }
@@ -1097,7 +1133,17 @@ function miniHTML(e){
     if (e.tool) h += `\n<span class="c">*</span> ${esc(e.tool.name)}${k} ${clipMini(escBody(e.tool.args), 54)}`;
     return h;
   }
-  if (e.role === "toolResult") return `<span class="r">→</span>${k} ${clipMini(escBody(e.text), 62)}`;
+  if (e.role === "toolResult") {
+    if (e.bg) return `<span class="r">→</span>${k} Started background task ${e.bg.id}（cmd: ${esc(e.bg.cmd)}）（完成时自动通知，别轮询）`;
+    return `<span class="r">→</span>${k} ${clipMini(escBody(e.text), 62)}`;
+  }
+  if (e.role === "custom") {
+    // 头部 4 行原样，正文截断
+    const lines = e.text.split("\n");
+    const head = lines.slice(0, CFG_CUSTOM_HEAD).join("\n");
+    const rest = lines.slice(CFG_CUSTOM_HEAD).join("\n");
+    return `<span class="k">[user]</span>\n${esc(head)}` + (rest ? `\n${clipMini(rest, 62)}` : '');
+  }
   return esc(e.text || '');
 }
 
@@ -1124,7 +1170,7 @@ let sumLineEls = sumLineElsA;
 const formatNote = document.createElement("div");
 formatNote.className = "sumline fmtnote";
 formatNote.dataset.pin = "top";
-formatNote.innerHTML = "格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取。";
+formatNote.innerHTML = "格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取；「[background] 」是已折叠的后台任务通知，日志用 bash_output 取。";
 sumBody.prepend(formatNote);
 const tailNote = document.createElement("div");
 tailNote.className = "sumline";
@@ -1185,9 +1231,8 @@ const ANCHORS = [
   // 1 触发
   ['pi.on("session_before_compact"'],
   // 2 渲染 pi 的投影
-  [{from:'const makeRender =', to:'const out: string[] = [];'},
-   {from:'for (const { sourceEntry: src, messages } of entries) {', to:'if (src.type === "compaction") continue;'},
-   'buildSessionProjection(event.branchEntries)'],
+  ['const makeRender =', {from:'for (const { sourceEntry: src, messages } of entries) {', to:'if (src.type === "compaction") continue;'},
+   'buildSessionProjection(event.branchEntries)', '被 context_edit 省略（replacement: null）的条目'],
   // 3 切点来自 pi（未过滤的投影条目里找）
   [{from:'const cut = proj.entries.findIndex', to:'const cut = proj.entries.findIndex'},
    '// 切点直接用 pi 算好的那个'],
@@ -1206,7 +1251,14 @@ const ANCHORS = [
   // 8 图片 + !!
   ['const imgTag = (mimeType: string)', 'if (m.excludeFromContext) continue;',
    'else if (p.type === "image") buf.push(imgTag(p.mimeType));', {from:'if (role === "custom") {', to:'continue;'}],
-  // 9 拼起来 + 格式说明
+  // 9 后台任务 / 扩展通知
+  ['const CUSTOM_HEAD_LINES =', 'const BG_START = /^Started background task',
+   'const bgCall = new Map<string, { cmd: string; isBg: boolean }>();',
+   'isBg: b.arguments?.background === true,',
+   {from:'// 三重校验，缺一不可：', to:'if (bg) {'},
+   {from:'const cmd = call?.cmd', to:'（完成时自动通知，别轮询）'},
+   'if (role === "custom") {', 'lines.length <= CUSTOM_HEAD_LINES + 2'],
+  // 10 拼起来 + 格式说明
   ['const FORMAT_NOTE =', 'const TAIL_NOTE =', {from:'const summary = `${FORMAT_NOTE}', to:'};'}],
   // 10 重建上下文
   [],
@@ -1245,6 +1297,8 @@ function resolveAnchors(spec){
 let step = 0, timer = null;
 let activeCutmark = null;
 const cutmarks = [...document.querySelectorAll(".cutmark")];
+
+let focusScrollTimer = null;
 
 function go(n){
   step = Math.max(0, Math.min(STEPS.length - 1, n));
@@ -1325,6 +1379,22 @@ function go(n){
   if (cutRow && S.cutAt != null) {
     const r = cutRow.row.getBoundingClientRect();
     if (r.top < 60 || r.top > innerHeight - 160) cutRow.row.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  // 聚焦「别的扩展的通知 / 后台任务」的那一步：最后滚，压过上面切点的滚动。
+  // 行的 max-height 有 .5s 过渡，直接量拿到的是动画中途位置，先关掉过渡量最终位置。
+  if (S.focusCustom) {
+    const t = rowEls.find(r => r.entry.role === "custom" || r.entry.bg);
+    const stage = document.querySelector(".stage");
+    if (t && stage) {
+      // 别的行正在收起（max-height .5s），这时量到的是中途位置。等收完再滚。
+      focusScrollTimer && clearTimeout(focusScrollTimer);
+      focusScrollTimer = setTimeout(() => {
+        const r = t.row.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+        const top = stage.scrollTop + (r.top - sr.top) - stage.clientHeight / 2 + r.height / 2;
+        stage.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      }, 520);
+    }
   }
 
   // 回查模式
