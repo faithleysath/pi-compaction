@@ -412,91 +412,101 @@ console.log("\n[9g] pi-bg-bash 通知：头部保留、正文截断、旧轮次�
   check("通知仍无 #N 编号", !/\[user#\d+\]\nBackground task/.test(s));
 }
 
-console.log("\n[9h] 折叠不吞掉后台任务 id");
+console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带出来");
 {
-  const prev = [
-    "格式：x",
-    "",
-    "[user#1]",
-    "起个构建",
-    "",
-    "* bash#2 {\"command\":\"npm run build\",\"background\":true}",
-    "",
-    "→#3 Started background task bg-1. Its completion is reported automatically.",
-    "",
-    "---",
-    "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。",
-  ].join("\n");
-  const entries: Entry[] = [
-    user("u1", "起个构建"),
-    asst("a1", "好"),
-    user("u2", "第二轮 " + "x".repeat(4000)),
-  ];
-  const { res } = run(entries, { reason: "manual", firstKept: "u2", prev });
-  const s: string = res?.compaction?.summary ?? "";
-  check("折叠后仍记得 bg-1", s.includes("bg-1"), s.slice(0, 400));
-  check("记下了启动命令", s.includes("npm run build"));
-  check("明确提示状态要用 bash_tasks 查", s.includes("bash_tasks"));
-  check("工具调用本身仍被折叠", /（调用工具 \d+ 次 #/.test(s));
-}
+  const S = (id: string) =>
+    `Started background task ${id}. Its completion is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of sleeping or polling.`;
 
-console.log("\n[9h2] 多个后台任务必须各自配对正确的命令");
-{
-  const mkPrev = (body: string[]) =>
-    ["格式：x", "", ...body, "", "---", "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。"].join("\n");
-  const entries = (): Entry[] => [user("u1", "q"), asst("a1", "a"), user("u2", "后续 " + "x".repeat(4000))];
-  const bgLines = (prev: string) => {
-    const { res } = run(entries(), { reason: "manual", firstKept: "u2", prev });
-    return ((res?.compaction?.summary ?? "") as string).split("\n").filter((l: string) => l.startsWith("[background]"));
+  /** 造一个「一条 assistant 带若干 toolCall + 对应 toolResult」的会话 */
+  const session = (calls: { id: string; name: string; args: any }[], results: { tc: string; text: string }[]): Entry[] => {
+    const es: Entry[] = [
+      user("u1", "跑一下"),
+      { id: "a1", type: "message", message: { role: "assistant", content: calls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.args })) } },
+      ...results.map((r, i) => ({ id: `r${i}`, type: "message", message: { role: "toolResult", toolCallId: r.tc, toolName: "bash", content: [{ type: "text", text: r.text }] } })),
+      user("u2", "后续 " + "x".repeat(4000)),
+    ];
+    return es;
   };
 
-  // 串行：调用→结果→调用→结果
-  const seq = bgLines(mkPrev([
-    "[user#1]", "都跑一下",
-    "", "* bash#2 {\"command\":\"npm run build\",\"background\":true}",
-    "", "→#3 Started background task bg-1. Its completion is reported automatically.",
-    "", "* bash#4 {\"command\":\"npm test\",\"background\":true}",
-    "", "→#5 Started background task bg-2. Its completion is reported automatically.",
-  ]));
-  check("串行：bg-1 配 build", seq.some((l: string) => /bg-1 .*npm run build/.test(l)), seq);
-  check("串行：bg-2 配 test", seq.some((l: string) => /bg-2 .*npm test/.test(l)), seq);
+  /** 跑两轮：第一轮生成摘要，第二轮折叠 */
+  const twice = (es: Entry[]) => {
+    const s1: string = run(es, { reason: "manual", firstKept: "u2" }).res?.compaction?.summary ?? "";
+    const s2: string = run(es, { reason: "manual", firstKept: "u2", prev: s1 }).res?.compaction?.summary ?? "";
+    return { s1, s2, bg: s2.split("\n").filter((l: string) => l.startsWith("[background]")) };
+  };
 
-  // 并行：两个调用连着，两个结果连着
-  const par = bgLines(mkPrev([
-    "[user#1]", "并行跑",
-    "", "* bash#2 {\"command\":\"bun run build:web\",\"background\":true}",
-    "", "* bash#2 {\"command\":\"bun run build:api\",\"background\":true}",
-    "", "→#3 Started background task bg-7. Its completion is reported automatically.",
-    "", "→#4 Started background task bg-8. Its completion is reported automatically.",
-  ]));
-  check("并行：bg-7 配 build:web", par.some((l: string) => /bg-7 .*build:web/.test(l)), par);
-  check("并行：bg-8 配 build:api", par.some((l: string) => /bg-8 .*build:api/.test(l)), par);
+  // 单个后台任务
+  const one = twice(session(
+    [{ id: "tcB", name: "bash", args: { command: "npm run build", background: true } }],
+    [{ tc: "tcB", text: S("bg-1") }],
+  ));
+  check("渲染阶段就把命令写进结果行", one.s1.includes("Started background task bg-1（cmd: npm run build）"), one.s1.slice(0, 200));
+  check("去掉「别轮询」那段废话之外的重复提示保留", one.s1.includes("完成时自动通知，别轮询"));
+  check("折叠后记得 bg-1", one.bg.some((l: string) => l.includes("bg-1")), one.bg);
+  check("折叠后带着正确命令", one.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), one.bg);
+  check("提示状态要用 bash_tasks 查", one.s2.includes("bash_tasks"));
 
-  // 普通调用夹在前面，队列不能错位
-  const mixed = bgLines(mkPrev([
-    "[user#1]", "先读再跑",
-    "", "* read#2 {\"path\":\"a.ts\"}",
-    "", "→#3 文件内容",
-    "", "* bash#4 {\"command\":\"bun test\",\"background\":true}",
-    "", "→#5 Started background task bg-9. Its completion is reported automatically.",
-  ]));
-  check("夹着普通调用时仍配对方", mixed.some((l: string) => /bg-9 .*bun test/.test(l)), mixed);
+  // 串行两个后台任务
+  const seq = twice(session(
+    [
+      { id: "tc1", name: "bash", args: { command: "npm run build", background: true } },
+      { id: "tc2", name: "bash", args: { command: "npm test", background: true } },
+    ],
+    [{ tc: "tc1", text: S("bg-1") }, { tc: "tc2", text: S("bg-2") }],
+  ));
+  check("串行：bg-1 配 build", seq.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), seq.bg);
+  check("串行：bg-2 配 test", seq.bg.some((l: string) => /bg-2 启动：npm test/.test(l)), seq.bg);
 
-  // 没有后台任务 → 不该产出记录
-  const none = bgLines(mkPrev([
-    "[user#1]", "只跑前台",
-    "", "* bash#2 {\"command\":\"ls\"}",
-    "", "→#3 a.ts",
-  ]));
-  check("没有后台任务时不产出记录", none.length === 0, none);
+  // 并行：bash + read，read 的结果先返回（审计指出的错位场景）
+  const par = twice(session(
+    [
+      { id: "tcB", name: "bash", args: { command: "npm run build", background: true } },
+      { id: "tcR", name: "read", args: { path: "src/index.ts" } },
+    ],
+    [{ tc: "tcR", text: "文件内容" }, { tc: "tcB", text: S("bg-1") }],
+  ));
+  check("混合并行：read 抢不走 bash 的命令", par.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), par.bg);
+  check("混合并行：不会产出空命令记录", !par.bg.some((l: string) => /启动（/.test(l)), par.bg);
 
-  // 命令里的转义引号要还原
-  const quoted = bgLines(mkPrev([
-    "[user#1]", "带引号",
-    "", "* bash#2 {\"command\":\"echo \\\"hi\\\" && sleep 1\",\"background\":true}",
-    "", "→#3 Started background task bg-10. Its completion is reported automatically.",
-  ]));
-  check("转义引号被还原", quoted.some((l: string) => l.includes('echo "hi" && sleep 1')), quoted);
+  // 三条调用、结果乱序
+  const anyOrder = twice(session(
+    [
+      { id: "t1", name: "bash", args: { command: "npm run build", background: true } },
+      { id: "t2", name: "read", args: { path: "x.ts" } },
+      { id: "t3", name: "bash", args: { command: "npm test", background: true } },
+    ],
+    [{ tc: "t3", text: S("bg-9") }, { tc: "t2", text: "文件内容" }, { tc: "t1", text: S("bg-8") }],
+  ));
+  check("乱序结果：bg-8 配 build", anyOrder.bg.some((l: string) => /bg-8 启动：npm run build/.test(l)), anyOrder.bg);
+  check("乱序结果：bg-9 配 test", anyOrder.bg.some((l: string) => /bg-9 启动：npm test/.test(l)), anyOrder.bg);
+
+  // 没有后台任务 → 不产出记录
+  const none = twice(session(
+    [{ id: "tcL", name: "bash", args: { command: "ls" } }],
+    [{ tc: "tcL", text: "a.ts" }],
+  ));
+  check("没有后台任务时不产出记录", none.bg.length === 0, none.bg);
+
+  // 命令里的引号 / 换行
+  const quoted = twice(session(
+    [{ id: "tcQ", name: "bash", args: { command: 'echo "hi" &&\nsleep 1', background: true } }],
+    [{ tc: "tcQ", text: S("bg-10") }],
+  ));
+  check("命令里的换行压成 ⏎", quoted.bg.some((l: string) => l.includes('echo "hi" && ⏎ sleep 1')), quoted.bg);
+
+  // 老格式摘要（命令只写在 `*` 行）：不崩，只是没有命令
+  const legacyPrev = [
+    "格式：x", "",
+    "[user#1]", "起构建", "",
+    "* bash#2 {\"command\":\"npm run build\",\"background\":true}", "",
+    "→#3 Started background task bg-1. Its completion is reported automatically.", "",
+    "---", "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。",
+  ].join("\n");
+  const legacy = run([user("u1", "q"), asst("a1", "a"), user("u2", "后续 " + "x".repeat(4000))],
+    { reason: "manual", firstKept: "u2", prev: legacyPrev });
+  const ls: string = legacy.res?.compaction?.summary ?? "";
+  check("老格式摘要仍能认出 bg-1", /\[background\] bg-1 启动/.test(ls), ls.slice(0, 300));
+  check("老格式没有命令时不编造", !/bg-1 启动：/.test(ls), ls.slice(0, 300));
 }
 
 console.log("\n[9i] 旧轮次的 pi-bg-bash 通知折成一行");

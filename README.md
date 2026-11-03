@@ -133,7 +133,13 @@ M src/auth/session.ts
 [background] bg-1 启动：npm run build（状态用 bash_tasks 查）
 ```
 
-除非同一段里启动了多个任务 —— 命令是**按「调用 → 结果」配对**的，不是拿第一条套全部：
+命令是在**渲染阶段用 `toolCallId` 绑上去的**，不靠「调用行 / 结果行」的位置配对：
+
+```
+→#3 Started background task bg-1（cmd: npm run build）（完成时自动通知，别轮询）
+```
+
+折叠后变成：
 
 ```
 （调用工具 4 次 #2–#5）
@@ -141,6 +147,9 @@ M src/auth/session.ts
 [background] bg-1 启动：npm run build（状态用 bash_tasks 查）
 [background] bg-2 启动：npm test（状态用 bash_tasks 查）
 ```
+
+为什么不能按位置配：并行调用里 `read` 没有 `command`，但它的结果照样占一个位置；
+结果顺序也不保证和调用顺序一致。`toolCallId` 是唯一可靠的关联。
 
 否则模型压缩后就不知道还有任务在跑。状态写的是压缩那一刻的，实时状态用 `bash_tasks` 查，
 日志用 `bash_output <id>` 取——两者都不受压缩影响。

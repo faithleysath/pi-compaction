@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>431 行 pi 压缩扩展 · 动画解读</title>
+<title>448 行 pi 压缩扩展 · 动画解读</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#11161f; --panel2:#0e131b; --line:#1e2633;
@@ -199,7 +199,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>431 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
+    <h1>448 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
     <div class="nav">
       <div class="dots" id="dots"></div>
       <button id="prev">←</button>
@@ -454,28 +454,20 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (!run.length) return;
 		let calls = 0;
 		const nums: number[] = [];
-		// 后台任务：id 只出现在结果行里，命令在调用行的参数里 —— 必须按「调用→结果」配对，
-		// 不能拿第一条命令套给所有任务（同一段里跑 build 和 test 就会张冠李戴）。
+		// 后台任务：id 和命令都已经写在同一行里（渲染时用 toolCallId 绑好的），
+		// 折叠只需要把那一行捞出来，不需要按位置配对 —— 并行、乱序都不会配错。
 		const started: { id: string; cmd: string }[] = [];
-		const pending: string[] = []; // 已经出现、还没等到结果的命令，先进先出
-		let lastCmd = "";
 		for (const b of run) {
 			const head = b.lines[0];
-			if (head.startsWith("* ")) {
-				calls++;
-				const cmd = head.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
-				lastCmd = cmd ? cmd.replace(/\\"/g, '"').replace(/\\n/g, " ⏎ ").slice(0, 120) : "";
-				if (lastCmd) pending.push(lastCmd);
-			} else {
-				// 一条结果消耗一条命令（无论它是不是后台任务，保持队列对齐）
-				const cmd = pending.length ? pending.shift()! : lastCmd;
-				for (const l of b.lines) {
-					const st = l.match(BG_START);
-					if (st) started.push({ id: st[1], cmd });
-				}
-			}
+			if (head.startsWith("* ")) calls++;
 			const m = head.match(/#(\d+)/);
 			if (m) nums.push(Number(m[1]));
+			for (const l of b.lines) {
+				const st = l.match(BG_START);
+				if (!st) continue;
+				const cmd = l.match(/（cmd: ([^）]*)）/)?.[1] ?? "";
+				started.push({ id: st[1], cmd });
+			}
 		}
 		if (calls === 0) {
 			// 只有结果行（正常不会发生），原样吐回去
@@ -563,6 +555,21 @@ const makeRender =
 	(cfg: ClipConfig) =>
 	(entries: { sourceEntry: any; messages: any[] }[], ref: Map<string, number>): string => {
 		const clipResult = (s: string) => clipHeadTail(s, cfg.toolResultHead, cfg.toolResultTail);
+
+		// toolCallId → 命令。用来把「Started background task bg-1」和它自己的那条 bash 精确绑上。
+		// 靠位置配对会错：并行调用里 read 没有 command，但它的结果照样占一个位置。
+		const cmdByCall = new Map<string, string>();
+		for (const { messages } of entries) {
+			for (const m of messages) {
+				if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+				for (const b of m.content) {
+					if (b?.type !== "toolCall") continue;
+					const c = b.arguments?.command;
+					if (typeof c === "string" && c) cmdByCall.set(b.id, c.replace(/\s*\n\s*/g, " ⏎ ").slice(0, 120));
+				}
+			}
+		}
+
 		const out: string[] = [];
 
 		for (const { sourceEntry: src, messages } of entries) {
@@ -606,7 +613,17 @@ const makeRender =
 				if (role === "user") {
 					out.push(`[user${t}]\n${esc(text(m.content))}`);
 				} else if (role === "toolResult") {
-					out.push(`→${t} ${clipResult(esc(text(m.content)))}`);
+					const body = text(m.content);
+					const bg = body.match(BG_START);
+					if (bg) {
+						// 这条固定是「Started background task bg-N. 后面一大段别轮询的提示」。
+						// 摘掉那段提示（190 字，折叠后毫无价值），换成这条调用自己的命令 ——
+						// 命令用 toolCallId 查，和消息位置无关，并行/乱序都不会配错。
+						const cmd = m.toolCallId ? cmdByCall.get(m.toolCallId) : undefined;
+						out.push(`→${t} Started background task ${bg[1]}${cmd ? `（cmd: ${esc(cmd)}）` : ""}（完成时自动通知，别轮询）`);
+						continue;
+					}
+					out.push(`→${t} ${clipResult(esc(body))}`);
 				} else if (role === "assistant" && Array.isArray(m.content)) {
 					// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
 					let buf: string[] = [];
