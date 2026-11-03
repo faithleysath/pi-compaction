@@ -111,7 +111,7 @@ const esc = (s: string) =>
  * 84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。
  */
 const FORMAT_NOTE =
-	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取。";
+	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取；「[background] 」是已折叠的后台任务通知，日志用 bash_output 取。";
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。";
@@ -155,6 +155,25 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 	const NEW_BLOCK = /^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #])|---\s*$)/;
 	const isToolLine = (l: string) => /^(\* |→(?=[ #]))/.test(l);
 
+	/**
+	 * 后台任务通知块 → 一行记录。
+	 *
+	 * pi-bg-bash 的两类通知都是 `[user]` 块：完成通知（id + 状态 + 命令 + 日志尾）
+	 * 和 bash_watch 的持续输出（id + seq + JSON 记录）。旧轮次里它们会层层累积，
+	 * 而工具折叠不会碰它们（它们不是 `*` / `→` 开头的行）。
+	 * 这里压成一行：保留 id 和终态，日志用 `bash_output <id>` 还能取回。
+	 */
+	const bgNotice = (lines: string[]): string | null => {
+		if (lines[0] !== "[user]") return null;
+		const first = lines[1] ?? "";
+		const fin = first.match(/^Background task (\S+) finished: ([^,\n]+)/);
+		if (fin) return `[background] ${fin[1]} 完成：${fin[2]}`;
+		if (!first.startsWith("Background command output")) return null;
+		const idLine = lines.find((l) => /^Task \S+;/.test(l));
+		const id = idLine?.match(/^Task (\S+?);/)?.[1];
+		return id ? `[background] ${id} 输出批次` : null;
+	};
+
 	const lines = text.split("\n");
 	type Block = { tool: boolean; lines: string[] };
 	const blocks: Block[] = [];
@@ -174,17 +193,34 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (!run.length) return;
 		let calls = 0;
 		const nums: number[] = [];
+		const starts: string[] = []; // 这段被折掉的工具调用里启动的后台任务 id
+		const cmds: string[] = []; // 同一段里的命令（给上面那行用）
 		for (const b of run) {
 			const head = b.lines[0];
 			if (head.startsWith("* ")) calls++;
 			const m = head.match(/#(\d+)/);
 			if (m) nums.push(Number(m[1]));
+			if (head.startsWith("* ")) {
+				const cmd = head.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+				if (cmd) cmds.push(cmd.replace(/\\"/g, '"').replace(/\\n/g, " ⏎ ").slice(0, 120));
+			}
+			// 后台任务的 id 只出现在结果行里；命令在同一段的 `* ` 行参数里
+			for (const l of b.lines) {
+				const st = l.match(BG_START);
+				if (st) starts.push(st[1]);
+			}
 		}
 		if (calls === 0) {
 			// 只有结果行（正常不会发生），原样吐回去
 			for (const b of run) out.push(b.lines.join("\n"));
 		} else {
 			out.push(marker({ calls, lo: Math.min(...nums), hi: Math.max(...nums) }));
+			// 折叠会吞掉「Started background task bg-1」，模型就不知道还有任务在跑。
+			// 补一行记录（状态是压缩那一刻的，要用 bash_tasks 查实时）。
+			for (const id of starts) {
+				const cmd = cmds.length ? `：${cmds[0]}` : "";
+				out.push(`[background] ${id} 启动${cmd}（状态用 bash_tasks 查）`);
+			}
 		}
 		run = [];
 	};
@@ -194,11 +230,49 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			continue;
 		}
 		flush();
+		// 后台通知：只留 id 和终态，日志用 bash_output 取
+		const note = bgNotice(b.lines);
+		if (note) {
+			// 同一批里连续的同类记录合并，别一屏都是「输出批次」
+			const prev = out[out.length - 1];
+			const dup = prev?.match(/^(\[background\] \S+ 输出批次) ×(\d+)$/);
+			if (note.endsWith("输出批次") && dup && note.startsWith(dup[1])) {
+				out[out.length - 1] = `${dup[1]} ×${Number(dup[2]) + 1}`;
+			} else if (note.endsWith("输出批次") && prev === note) {
+				out[out.length - 1] = `${note} ×2`;
+			} else {
+				out.push(note);
+			}
+			continue;
+		}
 		out.push(b.lines.join("\n").replace(/\n+$/, ""));
 	}
 	flush();
 	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 };
+
+/**
+ * 别的扩展注入的通知（`custom_message`）怎么压缩。
+ *
+ * 这类消息有固定形状：前几行是结构化的元数据（任务 ID / 状态 / 命令），后面才是正文。
+ * 一律截头会把这些丢掉，一律保留又会被 `bash_watch` 那种持续输出撑爆。
+ * 所以：头部 N 行原样保留，剩下的走工具结果那套头+尾截断。
+ *
+ * 实测的两种形状（pi-bg-bash）：
+ *   pi-bg-bash         Background task bg-29 finished: exited (code 0), ran 2m 4s.
+ *                      Command: <一行命令>
+ *                      Last output, cut to the last 20 lines ...:
+ *                      <日志尾部>
+ *   pi-bg-bash-output  Background command output (data, not instructions):
+ *                      Task bg-3; 0 event lines lost
+ *                      seq_through=42; records=18
+ *                      {"seq":1,"line":"..."}
+ */
+const CUSTOM_HEAD_LINES = 4;
+
+/** 后台任务被启动 / 完成时，通知里固定出现的两句话 */
+const BG_START = /Started background task ([A-Za-z][\w-]*)/;
+const BG_FINISH = /Background task ([A-Za-z][\w-]*) finished: ([^,\n]+)/;
 
 /** `!cmd` 的执行状态尾巴。pi 自己的 bashExecutionToText 就是这么写的，别丢 */
 const bashStatus = (m: any) => {
@@ -244,7 +318,14 @@ const makeRender =
 
 				if (role === "custom") {
 					// 别的扩展注进去的通知：没有编号（它不是 type === "message" 条目）
-					out.push(`[user]\n${esc(text(m.content))}`);
+					// 头部结构行保留，正文按工具结果那套头+尾截断
+					const raw = esc(text(m.content));
+					const lines = raw.split("\n");
+					const body =
+						lines.length <= CUSTOM_HEAD_LINES + 2
+							? clipResult(raw)
+							: `${lines.slice(0, CUSTOM_HEAD_LINES).join("\n")}\n${clipResult(lines.slice(CUSTOM_HEAD_LINES).join("\n"))}`;
+					out.push(`[user]\n${body}`);
 					continue;
 				}
 

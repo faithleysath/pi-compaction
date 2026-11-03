@@ -114,6 +114,33 @@ M src/auth/session.ts
 - 单项非法（负数、非整数、字符串）→ 该项回落到默认值，其余照常
 - 老配置 `{ "toolChars": 500 }` 仍然兼容，按 70% / 30% 拆成 `toolResultHead` / `toolResultTail`
 
+## 和后台任务扩展共存（pi-bg-bash）
+
+`pi-bg-bash` 用两类 `custom_message` 往上下文里送东西，它们都不是 `type === "message"` 条目，
+没有 `#N` 编号。本包对它们的处理：
+
+| 消息 | 当前轮次 | 折叠进旧轮次 |
+|---|---|---|
+| 完成通知 `pi-bg-bash` | 保留头部 4 行（任务 ID / 状态 / 命令），正文头尾截断 | `[background] bg-1 完成：exited (code 0)` |
+| 持续输出 `pi-bg-bash-output` | 保留头部（task / seq / records），正文头尾截断 | `[background] bg-3 输出批次 ×N` |
+| 其他扩展的通知 | 同样按「头部 4 行 + 头尾截断」 | 不动 |
+
+折叠掉工具调用时，如果那段里有 `Started background task bg-1`，会额外补一行：
+
+```
+（调用工具 3 次 #12–#17）
+
+[background] bg-1 启动：npm run build（状态用 bash_tasks 查）
+```
+
+否则模型压缩后就不知道还有任务在跑。状态写的是压缩那一刻的，实时状态用 `bash_tasks` 查，
+日志用 `bash_output <id>` 取——两者都不受压缩影响。
+
+检索侧：`recall.query` 也会搜通知，命中标成 `notice#N`；用 `recall({ notices: [N] })` 取全文。
+这个编号和 `#N` 完全独立，不影响任何已有摘要里的引用。
+
+压缩不会结束 session，也不会碰后台进程——`/compact` 期间跑着的任务照常跑完、照常发通知。
+
 ## 多轮压缩时的折叠
 
 第 N 轮压缩时，第 1…N−1 轮的工具调用会被折成一行：

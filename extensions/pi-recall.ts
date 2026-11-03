@@ -56,6 +56,8 @@ const render = (msg: any, full: boolean): string => {
 	const cut = (s: string) => (s.length <= cap ? s : `${s.slice(0, cap)}…(+${s.length - cap})`);
 	if (!msg) return "";
 	if (msg.role === "excluded") return "（这条是 !! 命令，内容被排除在上下文之外，不提供）";
+	// 别的扩展注入的通知：带上 customType，才能分清是后台任务还是别的东西
+	if (msg.role === "custom") return `[${msg.customType ?? "custom"} notice]\n${cut(text(msg.content))}`;
 	if (msg.role === "user") return `[user]\n${cut(text(msg.content))}`;
 	if (msg.role === "bashExecution") return `[user] $ ${msg.command}\n${cut(msg.output ?? "")}`;
 	if (msg.role === "toolResult") return `[toolResult:${msg.toolName}]\n${cut(text(msg.content))}`;
@@ -84,13 +86,17 @@ export default function (pi: ExtensionAPI) {
 			"- query: keywords — search the whole session, 5 hits per page, ranked.",
 			"expand accepts several numbers at once (batch). Add image: true to get the real image blocks.",
 			"#N is the number shown in summary headers like [user#12] / * read#12 / →#13. Only the current session is searchable.",
+			"Extension-injected notifications (e.g. pi-bg-bash completion / watch output) are not messages, so they have no #N: pass their index in notices to read one in full.",
 		].join("\n"),
 		parameters: Type.Object({
 			expand: Type.Optional(Type.Array(Type.Number(), { description: "Entry indices (#N, e.g. 12 for [user#12]) to return in full." })),
 			range: Type.Optional(
 				Type.Array(Type.Number(), { minItems: 2, maxItems: 2, description: "[from, to]: entries #from..#to inclusive." }),
 			),
-			query: Type.Optional(Type.String({ description: "Keywords to search for across the session." })),
+			query: Type.Optional(Type.String({ description: "Keywords to search for across the session (includes extension notifications)." })),
+			notices: Type.Optional(
+				Type.Array(Type.Number(), { description: "Notification indices (N shown as 'notice#N' in query hits) to return in full. These are custom_message entries and do not have a message #N." }),
+			),
 			page: Type.Optional(Type.Number({ description: "Page number for range or query, 1-based. Default 1." })),
 			image: Type.Optional(
 				Type.Boolean({
@@ -112,7 +118,40 @@ export default function (pi: ExtensionAPI) {
 				msgs.push({ n: n++, msg: e.message });
 			}
 			const byN = new Map(msgs.map((m) => [m.n, m.msg]));
+
+			// 扩展注入的通知（custom_message）不占 #N —— 编号空间要和 compaction 完全一致，
+			// 多一个就全错位。所以单独给一套 notice#N：只用于 query 命中和 notices 参数。
+			const notices: { n: number; customType: string; content: any }[] = [];
+			for (const e of entries) {
+				if (e.type !== "custom_message") continue;
+				notices.push({ n: notices.length, customType: e.customType ?? "custom", content: e.content });
+			}
+			const byNotice = new Map(notices.map((x) => [x.n, x]));
+
 			const page = Math.max(1, Math.floor(params.page ?? 1));
+
+			// notices：按 notice#N 取单条通知全文
+			if (Array.isArray(params.notices) && params.notices.length > 0) {
+				const chunks: string[] = [];
+				let budget = MAX_TEXT_CHARS;
+				for (const raw of params.notices) {
+					const idx = Number(raw);
+					const x = byNotice.get(idx);
+					if (!x) {
+						chunks.push(`notice#${idx}: no such notification`);
+						continue;
+					}
+					const full = `notice#${x.n} [${x.customType}]\n${text(x.content)}`;
+					if (full.length <= budget) {
+						budget -= full.length;
+						chunks.push(full);
+					} else {
+						chunks.push(`${full.slice(0, Math.max(0, budget))}…(+${full.length - Math.max(0, budget)}，超出单次文本上限)`);
+						budget = 0;
+					}
+				}
+				return { content: [{ type: "text", text: chunks.join("\n\n---\n\n") }], details: undefined };
+			}
 
 			// expand（批量：一次可以给多个编号，可带回原始图片块）
 			if (Array.isArray(params.expand) && params.expand.length > 0) {
@@ -228,17 +267,26 @@ export default function (pi: ExtensionAPI) {
 			if (typeof params.query === "string" && params.query.trim()) {
 				// 单字符关键词也允许（中文里一个字经常就是关键词）
 				const terms = params.query.toLowerCase().split(/\s+/).filter((t: string) => t.length > 0);
-				const hits = msgs
-					.map((m) => {
-						// 搜索走全文，不用预览用的 800 字符截断
-						const body = render(m.msg, true).toLowerCase();
-						let score = 0;
-						for (const t of terms) {
-							const c = body.split(t).length - 1;
-							if (c > 0) score += 1 + Math.log(c);
-						}
-						return { ...m, score, body };
-					})
+				type Hit = { label: string; n: number; msg: any; score: number; body: string };
+				const scoreOf = (body: string) => {
+					let score = 0;
+					for (const t of terms) {
+						const c = body.split(t).length - 1;
+						if (c > 0) score += 1 + Math.log(c);
+					}
+					return score;
+				};
+				const msgHits: Hit[] = msgs.map((m) => {
+					// 搜索走全文，不用预览用的 800 字符截断
+					const body = render(m.msg, true).toLowerCase();
+					return { label: `#${m.n}`, n: m.n, msg: m.msg, score: scoreOf(body), body };
+				});
+				// 通知也参与搜索（它们的正文很可能就是你在找的日志），编号用 notice#N
+				const noticeHits: Hit[] = notices.map((x) => {
+					const body = render({ role: "custom", customType: x.customType, content: x.content }, true).toLowerCase();
+					return { label: `notice#${x.n}`, n: x.n, msg: x, score: scoreOf(body), body };
+				});
+				const hits = [...msgHits, ...noticeHits]
 					.filter((h) => h.score > 0)
 					.sort((a, b) => b.score - a.score || b.n - a.n);
 				if (hits.length === 0) {
@@ -248,11 +296,15 @@ export default function (pi: ExtensionAPI) {
 				const pageHits = hits.slice(start, start + PAGE);
 				const totalPages = Math.max(1, Math.ceil(hits.length / PAGE));
 				const body = pageHits
-					.map((h) => `#${h.n}  ${render(h.msg, false).slice(0, 300)}`)
+					.map((h) =>
+						h.label.startsWith("notice#")
+							? `${h.label}  [${h.msg.customType}]\n${render({ role: "custom", customType: h.msg.customType, content: h.msg.content }, false).slice(0, 300)}`
+							: `${h.label}  ${render(h.msg, false).slice(0, 300)}`,
+					)
 					.join("\n\n---\n\n");
 				const more =
 					page < totalPages
-						? `\n\n--- ${hits.length} hits, page ${page}/${totalPages}: use page:${page + 1}, or expand:[${pageHits[0].n}] for the full entry ---`
+						? `\n\n--- ${hits.length} hits, page ${page}/${totalPages}: use page:${page + 1}, or ${pageHits[0].label.startsWith("notice#") ? `notices:[${pageHits[0].n}]` : `expand:[${pageHits[0].n}]`} for the full entry ---`
 						: `\n\n--- ${hits.length} hits ---`;
 				return { content: [{ type: "text", text: body + more }], details: undefined };
 			}

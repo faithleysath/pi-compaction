@@ -99,5 +99,30 @@ console.log("\n[7] 编号与 compaction 一致（只数 type==='message'）");
   check("compaction 和 custom_message 不占号", out.text.includes("#1") && out.text.includes("第 1 条"), out.text);
 }
 
+console.log("\n[8] 扩展通知：query 能搜到，notices 能取全文，且不占 #N");
+{
+  const entries = [
+    mk("u1", "user", T("起构建")),
+    mk("a1", "assistant", T("好")),
+    { id: "cm1", type: "custom_message", customType: "pi-bg-bash", content: "Background task bg-1 finished: exited (code 0)\nBUILD_OK_TAG", display: true },
+    { id: "cm2", type: "custom_message", customType: "pi-bg-bash-output", content: "Task bg-3; 0 lost\nWATCH_LINE_TAG", display: true },
+    mk("u2", "user", T("后续")),
+  ];
+  const q1 = await call(entries, { query: "BUILD_OK_TAG" });
+  check("query 能搜到完成通知", q1.text.includes("notice#0"), q1.text);
+  check("命中项标了 customType", q1.text.includes("pi-bg-bash"), q1.text);
+  const q2 = await call(entries, { query: "WATCH_LINE_TAG" });
+  check("query 能搜到 watch 输出", q2.text.includes("notice#1"), q2.text);
+
+  const nt = await call(entries, { notices: [0] });
+  check("notices 取全文", nt.text.includes("BUILD_OK_TAG"), nt.text.slice(0, 120));
+
+  const ex = await call(entries, { expand: [2] });
+  check("通知不占 #N（#2 仍是 user 消息）", ex.text.includes("#2") && ex.text.includes("后续"), ex.text.slice(0, 80));
+
+  const lim = await call(entries, { notices: [0, 1] });
+  check("notices 也受文本预算约束", lim.text.length < 120_000);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
