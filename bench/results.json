@@ -13,32 +13,38 @@
           {
             "round": 1,
             "chars": 2436,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 2,
             "chars": 4395,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 3,
             "chars": 6360,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 4,
             "chars": 8325,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 5,
             "chars": 10290,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 6,
             "chars": 12255,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           }
         ]
       },
@@ -48,32 +54,38 @@
           {
             "round": 1,
             "chars": 2436,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 2,
             "chars": 2783,
-            "markers": 2
+            "markers": 2,
+            "folds": 0
           },
           {
             "round": 3,
             "chars": 3135,
-            "markers": 3
+            "markers": 3,
+            "folds": 0
           },
           {
             "round": 4,
             "chars": 3484,
-            "markers": 4
+            "markers": 4,
+            "folds": 0
           },
           {
             "round": 5,
             "chars": 3833,
-            "markers": 5
+            "markers": 5,
+            "folds": 0
           },
           {
             "round": 6,
             "chars": 4182,
-            "markers": 6
+            "markers": 6,
+            "folds": 0
           }
         ]
       }
@@ -90,12 +102,14 @@
           {
             "round": 1,
             "chars": 45873,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 2,
             "chars": 91404,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           }
         ]
       },
@@ -105,12 +119,14 @@
           {
             "round": 1,
             "chars": 45873,
-            "markers": 1
+            "markers": 1,
+            "folds": 0
           },
           {
             "round": 2,
             "chars": 65208,
-            "markers": 56
+            "markers": 56,
+            "folds": 0
           }
         ]
       }
@@ -126,6 +142,71 @@
     "turns": [
       4620,
       10835
+    ]
+  },
+  "paseo": {
+    "notificationsPerRound": 3,
+    "envelopeBodyChars": 1500,
+    "rounds": 4,
+    "results": [
+      {
+        "collapseEnvelopes": false,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 6771,
+            "markers": 1,
+            "folds": 0
+          },
+          {
+            "round": 2,
+            "chars": 12922,
+            "markers": 2,
+            "folds": 0
+          },
+          {
+            "round": 3,
+            "chars": 19075,
+            "markers": 3,
+            "folds": 0
+          },
+          {
+            "round": 4,
+            "chars": 25228,
+            "markers": 4,
+            "folds": 0
+          }
+        ]
+      },
+      {
+        "collapseEnvelopes": true,
+        "rows": [
+          {
+            "round": 1,
+            "chars": 6771,
+            "markers": 1,
+            "folds": 0
+          },
+          {
+            "round": 2,
+            "chars": 7362,
+            "markers": 2,
+            "folds": 4
+          },
+          {
+            "round": 3,
+            "chars": 7639,
+            "markers": 3,
+            "folds": 4
+          },
+          {
+            "round": 4,
+            "chars": 7904,
+            "markers": 4,
+            "folds": 4
+          }
+        ]
+      }
     ]
   }
 }

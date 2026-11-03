@@ -30,7 +30,15 @@ README 面向使用；这里放实现上的取舍和支撑结论的实测数据�
 - 被替换的条目渲染替换后的内容
 - 上一轮的 compaction 条目是 `[system, summary]`，跳过，由 `previousSummary` 负责
 
-编号仍按 raw entries 里的 `type === "message"` 数，和 `recall` 完全一致。
+编号只数**会进上下文的条目**（`extensions/refs.ts`），和 `recall` 共用同一个函数：
+`type === "message"`、`role !== "system"`、不是 `!!`（`excludeFromContext`）。从 0 起。
+
+`role: "system"` 那个 loadout 条目是 prompt 状态，不是对话：paseo 懒加载 MCP 工具时一批写一条
+（一个会话里见过 5 条），把它算进编号会让摘要从 `[user#5]` 起跳，`recall #0..#4` 全是空的。
+`!!` 同理：内容根本不进上下文，给个号只会让后面的编号偏移。
+
+**这是 breaking change**：老摘要里的 `#N` 会整体前移（每个系统条目 1），所以不保证旧摘要能用——
+升级后请用 `recall query` 找老内容。
 
 ## 渲染规则
 
@@ -179,6 +187,87 @@ undefined，压缩 hook 根本不会被调用 —— 这时只能 `/new`。上�
 状态是压缩那一刻的；实时状态用 `bash_tasks` 查，日志用 `bash_output <id>` 取，两者都不受压缩影响。
 压缩不会结束 session，也不会碰后台进程。
 
+## 与 paseo 协作
+
+### paseo 造的消息
+
+paseo 把 agent 之间的通信、子代理完成回报、定时触发都写成**普通 user 消息**（不是
+`custom_message`，pi 侧看不到任何区别），外面套一层 XML 信封：
+
+```
+<paseo-system version="1" kind="agent-notification" source-agent-id="…" message-id="…"
+               source-server-id="…" source-agent-title="…" event="finished">
+Agent … (标题) finished.
+
+<agent-response>
+子代理最后一条助手消息（paseo 自己截到 4000 字符）
+</agent-response>
+</paseo-system>
+```
+
+`kind` 有 `agent-message`（代理间派活 / 兄弟消息）、`agent-notification`
+（`event` = `finished` / `errored` / `permission-required` / `closed`）、`user-message`
+（人输入的文字本身长得像信封时的防伪包装）。定时触发（`schedule` / `heartbeat` 打到已有 agent）
+用的是**不带版本号**的裸信封，正文第一行是 `Schedule "名字" fired (id=…, run=…).`。
+
+统计 1164 个真实 session：user 侧 769 万字符里，通知占 47.6%（p50 1,876）、派活占 42.2%（p50 958）、
+人自己说的话只占 9.7%（p50 23）。也就是说 paseo 场景下 user 侧 90% 是信封。
+
+### 折叠规则
+
+`extensions/paseo-envelope.ts`，只作用在 `previousSummary` 上（最新一轮保真）：
+
+| 原消息 | 折叠成 |
+|---|---|
+| `agent-notification` | `[paseo] <标题> notify:<event> (#N)` |
+| `agent-message` | `[paseo] <标题> from (#N)` |
+| `user-message` | `[paseo] quoted (#N)` |
+| 裸信封 + `Schedule … fired` | `[paseo] schedule "<名字>" fired (#N)` |
+
+标题取 `source-agent-title`（截 80 字符），没有就退回 `source-agent-id` 前 8 位。
+编号留在行尾：`recall #N` 取原信，或者拿 agent id 调 `mcp__paseo__get_agent_activity` 拉全过程。
+
+### 跨轮次合并
+
+心跳一天触发几十次，只折不合并等于没折。所以合并是**两步**：
+
+1. 块级：`[user#N]` + 完整信封 → 一行
+2. 行级：整段文本里所有 `[paseo] …` 行按标签分组，第一处保留、其余删掉，
+   编号并进 `×N (#a,#b,…)`
+
+第二步必须能认出**上一轮已经折过的行**（`[paseo] <label> ×N (…)` 会被解析回 label + count + nums），
+否则每轮都会多出一行新的、永远合不起来。`count` 从行里读，所以重复折叠不会越合越少
+（编号列最多 4 个，多余的用 `,…` 标记，`recall query` 能补齐）。
+
+### 误判防护
+
+三个条件同时满足才折：
+
+1. 块首是 `[user#N]`
+2. 正文第一行是完整开标签（属性全部合法），最后一行是 `</paseo-system>`
+3. 带版本号的必须有 `version="1"` + `kind` + `message-id`
+
+未知 `kind`、`version` 不是 1、缺闭合标签、属性里带尖括号的一律不动 —— 用户贴一段讲 paseo 的
+文档不会被折掉。反向也有防护：`esc()` 把正文里行首的 `[paseo]` 也转义了，正文混不进合并组。
+
+### 实测
+
+同一个真实会话（5,786 条、200k 窗口、keep 20k）：
+
+| | 不折信封 | 折信封 |
+|---|---|---|
+| 压缩次数 | 32 | 40 |
+| 死在第几条（摘要占满窗口、pi 拒绝再压） | 3,876（67%） | 5,757（99.5%） |
+| 第 5 轮摘要 | 307,762 字符 | 223,626 字符 |
+
+合成 workload（`bun run bench`，3 条通知 + 1 条派活 / 轮，压 4 轮）：
+25,228 → 7,904 字符（−68.7%），折叠行数固定在 4 行不随轮次增长。
+
+### 剩下的增长
+
+折完信封，摘要里剩的是助手正文（第 5 轮约 45%）和工具调用/结果（约 35%）。助手正文按设计不折，
+所以长期心跳会话最终还是会撞上「摘要占满窗口」那条限制 —— 那时只能 `/new`。
+
 ## 设计决定
 
 ### 永不 `return undefined`
@@ -201,5 +290,7 @@ undefined，压缩 hook 根本不会被调用 —— 这时只能 `/new`。上�
 
 ## 相关文件
 
+- `extensions/refs.ts` —— `#N` 编号规则（两个扩展共用）
+- `extensions/paseo-envelope.ts` —— paseo 信封识别 + 折叠 + 跨轮次合并
 - `docs/compaction-explainer.html` —— 14 步动画，代码面板高亮真实源码行
 - `tests/e2e/README.md` —— 真模型 E2E 的场景、跑法和已跑结论

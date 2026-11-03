@@ -7,7 +7,8 @@
  *           被 context_edit 省略/替换过的内容按投影后的样子渲染，不会把 pi 刻意丢掉的东西复活
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
  *   工具参数的截断长度、工具结果的头/尾长度各自可配（~/.pi/agent/pi-compaction.json）
- *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
+ *   编号在标题行里：[user#0] / [assistant#1] / * read#1 / →#2，可用 recall 取原文
+ *   （0 起，只数会进上下文的条目；规则本体在 refs.ts）
  *
  * 铁律：永远不 return undefined / 不抛错给 pi —— 那两条路径都会落到 pi 的默认 LLM 摘要。
  */
@@ -16,6 +17,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildSessionProjection, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { collapsePaseo } from "./paseo-envelope.ts";
+import { buildRefs } from "./refs.ts";
 
 /**
  * 三个截断长度，单位都是字符（不是 token）。
@@ -25,6 +28,9 @@ import { buildSessionProjection, getAgentDir } from "@earendil-works/pi-coding-a
  *   都在末尾，只取头会把「失败了」这条消息整个切掉。
  *
  * 抽样统计里 toolResult 的 p50 ≈ 411、p90 ≈ 6333 字符，默认 200 + 100 能覆盖一半以上。
+ *
+ * `paseo` 一组是 paseo 专用（见 paseo-envelope.ts）：paseo 把子代理通知、代理间派活、
+ * 定时触发都写成套了 XML 信封的 user 消息，实测占 paseo 会话 user 侧字符的 90%。
  */
 const DEFAULTS = {
 	toolArgs: 300,
@@ -32,6 +38,12 @@ const DEFAULTS = {
 	toolResultTail: 100,
 	/** 多轮压缩时，把旧轮次里的工具调用折成一行「调用工具 N 次 #a–#b」，只有最新一轮保留细节 */
 	collapseOldTools: true,
+	paseo: {
+		/** 旧轮次里的 paseo 信封折成一行 `[paseo] <标题> <动词> (#N)` */
+		collapseEnvelopes: true,
+		/** 同标题 / 同名 schedule 的多条合并成 `×N` —— 心跳一天几十条，不合并等于没折 */
+		mergeRepeats: true,
+	},
 };
 
 const CONFIG_PATH = join(getAgentDir(), "pi-compaction.json");
@@ -51,11 +63,16 @@ const loadConfig = (): ClipConfig => {
 	} catch {
 		return { ...DEFAULTS };
 	}
+	const bool = (v: unknown, fallback: boolean) => (typeof v === "boolean" ? v : fallback);
 	return {
 		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
 		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
 		toolResultTail: isCharCount(raw?.toolResultTail) ? raw.toolResultTail : DEFAULTS.toolResultTail,
-		collapseOldTools: typeof raw?.collapseOldTools === "boolean" ? raw.collapseOldTools : DEFAULTS.collapseOldTools,
+		collapseOldTools: bool(raw?.collapseOldTools, DEFAULTS.collapseOldTools),
+		paseo: {
+			collapseEnvelopes: bool(raw?.paseo?.collapseEnvelopes, DEFAULTS.paseo.collapseEnvelopes),
+			mergeRepeats: bool(raw?.paseo?.mergeRepeats, DEFAULTS.paseo.mergeRepeats),
+		},
 	};
 };
 
@@ -93,7 +110,8 @@ const esc = (s: string) =>
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
 		// 假结构行：[user#12] / [assistant] / * bash#3 / →#4 一律转义，免得伪装成真条目
-		.replace(/^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #]))/gm, "\\$1")
+		// `[paseo] ` 是折叠出来的行，正文里伪造会让合并和阅读一起错
+		.replace(/^(\[user(?=[#\]])|\[assistant(?=[#\]])|\[paseo\]|\* |→(?=[ #]))/gm, "\\$1")
 		// 正文里独立成行的 ---：它不是轮分隔符，不转义会被折叠函数当块边界，
 		// 把一条工具结果劈成两半（后半截丢掉 →#N 前缀，裸着掉出来）
 		.replace(/^---\s*$/gm, "\\---");
@@ -109,6 +127,9 @@ const FORMAT_NOTE =
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "Fetch the original text of any #N with the recall tool; add image:true to get images back.";
+/** 摘要里出现 `[paseo]` 行时才加这句，平时不多花 token */
+const PASEO_NOTE =
+	'"[paseo] <title> <verb> (#N)" is a folded paseo envelope (subagent notification, agent-to-agent message, or scheduled fire): recall #N for the original text, or get_agent_activity for the child transcript.';
 const TAIL_RE = /\n*---\nFetch the original text[^\n]*\n?\s*$/;
 /** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会剥不掉 */
 const FORMAT_RE = /^Format:[^\n]*\n*/;
@@ -125,14 +146,6 @@ const text = (c: unknown): string =>
 					.filter(Boolean)
 					.join("\n")
 			: "";
-
-/** 全局 #N：会话文件里第 N 个 type==="message" 条目（append-only，永不复用） */
-const buildRefs = (entries: any[]) => {
-	const m = new Map<string, number>();
-	let n = 0;
-	for (const e of entries) if (e.type === "message" && e.message) m.set(e.id, n++);
-	return m;
-};
 
 /**
  * 多轮压缩时折叠旧轮次的工具调用。
@@ -437,6 +450,13 @@ export default function (pi: ExtensionAPI) {
 			// 多轮：上一轮的摘要原样前置（剥掉它自己的格式说明和尾注，避免每轮累加）
 			let prev = event.preparation.previousSummary?.replace(FORMAT_RE, "").replace(TAIL_RE, "").trim();
 
+			// paseo 信封（子代理通知 / 代理间派活 / 定时触发）先折 —— 它们占 paseo 会话 user 侧的 90%，
+			// 而且不分形状地保留会把摘要直接撞爆。折完的东西全部能用 recall #N 取回。
+			// 注意只在 prev 上折：最新一轮（body）保留全文，和工具折叠的策略一致。
+			if (prev && cfg.paseo.collapseEnvelopes) {
+				prev = collapsePaseo(prev, { merge: cfg.paseo.mergeRepeats });
+			}
+
 			// 折叠旧轮次的工具调用：只有最新一轮（body）保留完整细节
 			if (prev && cfg.collapseOldTools) {
 				prev = collapseToolBlocks(prev, ({ calls, lo, hi }) =>
@@ -444,7 +464,9 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			const summary = `${FORMAT_NOTE}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
+			// 摘要里有 [paseo] 行时才加那句说明，平时不多花 token
+			const note = prev && /^\[paseo\] /m.test(prev) ? `${FORMAT_NOTE} ${PASEO_NOTE}` : FORMAT_NOTE;
+			const summary = `${note}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
 
 			return {
 				compaction: {

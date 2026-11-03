@@ -108,10 +108,65 @@ function round(r: number, turns: number, toolsPerTurn: number): Entry[] {
 	return Array.from({ length: turns }, (_, t) => turn(r, t, toolsPerTurn)).flat();
 }
 
-function writeConfig(collapseOldTools: boolean) {
+/* ── paseo workload：user 侧 90% 是信封 ─────────────── */
+
+/** 子代理标题固定，所以「同一子代理又一次完成」能测到合并 ×N */
+const PASEO_AGENTS = ["逆向-头部分析", "逆向-尾段定位", "博文维护"];
+const PASEO_BODY_CHARS = 1_500;
+const PASEO_TOOL_RESULT = `<paseo-system version="1" kind="user-message" message-id="x">${" "}</paseo-system>`.slice(0, 306);
+
+const envelopeNotif = (round: number, agent: number) => {
+	const title = PASEO_AGENTS[agent % PASEO_AGENTS.length];
+	const id = `${agent}${round}`.padStart(8, "0");
+	const body = `第 ${round} 轮结论：` + fill("把这一段的常量表抠出来，按位域重排后验证。", PASEO_BODY_CHARS);
+	return [
+		`<paseo-system version="1" kind="agent-notification" source-agent-id="${id}-4ac2-88b5-fcb0b49067fc" message-id="m-${round}-${agent}" source-server-id="srv_local" source-agent-title="${title}" event="finished">`,
+		`Agent ${id} (${title}) finished.`,
+		"",
+		"&lt;agent-response&gt;",
+		body,
+		"&lt;/agent-response&gt;",
+		"</paseo-system>",
+	].join("\n");
+};
+
+const envelopeSend = (round: number) =>
+	[
+		"<paseo-system version=\"1\" kind=\"agent-message\" source-agent-id=\"parent01-4ac2\" message-id=\"m-send-" + round + "\" source-agent-title=\"总协调\">",
+		"继续盯这一头，" + fill("把新的实测结果写进报告。", 300),
+		"</paseo-system>",
+	].join("\n");
+
+/** 一个 turn：3 条子代理通知（user 消息）+ 1 条父代理派活回显 + 1 次 MCP 调用 + 助手正文 */
+function paseoTurn(r: number, t: number): Entry[] {
+	const tag = `r${r}t${t}`;
+	const out: Entry[] = [];
+	for (let a = 0; a < PASEO_AGENTS.length; a++) {
+		out.push(msg(`u${tag}n${a}`, "user", [{ type: "text", text: envelopeNotif(r, a) }]));
+	}
+	out.push(msg(`u${tag}s`, "user", [{ type: "text", text: envelopeSend(r) }]));
+	out.push(
+		msg(`a${tag}`, "assistant", [
+			{ type: "text", text: asstText(tag) },
+			{
+				type: "toolCall",
+				id: `tc${tag}`,
+				name: "mcp__paseo__send_agent_prompt",
+				arguments: { agentId: `agent-${r}-${t}`, prompt: "继续", notifyOnFinish: true },
+			},
+		]),
+	);
+	out.push(msg(`r${tag}`, "toolResult", [{ type: "text", text: PASEO_TOOL_RESULT }], { toolName: "mcp__paseo__send_agent_prompt", toolCallId: `tc${tag}` }));
+	out.push(msg(`af${tag}`, "assistant", [{ type: "text", text: asstTail(tag) }]));
+	return out;
+}
+
+const paseoRound = (r: number, turns: number) => Array.from({ length: turns }, (_, t) => paseoTurn(r, t)).flat();
+
+function writeConfig(collapseOldTools: boolean, paseoCollapse = true) {
 	writeFileSync(
 		join(AGENT_DIR, "pi-compaction.json"),
-		JSON.stringify({ toolArgs: 300, toolResultHead: 200, toolResultTail: 100, collapseOldTools }, null, 2),
+		JSON.stringify({ toolArgs: 300, toolResultHead: 200, toolResultTail: 100, collapseOldTools, paseo: { collapseEnvelopes: paseoCollapse } }, null, 2),
 	);
 }
 
@@ -140,19 +195,26 @@ function runRound(entries: Entry[], cutId: string, previousSummary: string | und
 	return summary;
 }
 
-type Row = { round: number; chars: number; markers: number };
+type Row = { round: number; chars: number; markers: number; folds: number };
 
 /**
  * 跑 rounds 轮压缩。每轮只把上一轮放进窗口（更早的在上一次的摘要里），
  * 切点放在下一轮的哨兵消息上，于是本轮正文 = 一个完整轮次。
  */
-function measure(collapseOldTools: boolean, rounds: number, turns: number, toolsPerTurn: number): Row[] {
-	writeConfig(collapseOldTools);
+function measure(
+	collapseOldTools: boolean,
+	rounds: number,
+	turns: number,
+	toolsPerTurn: number,
+	makeRound: (r: number, turns: number) => Entry[] = (r, t) => round(r, t, toolsPerTurn),
+	paseoCollapse = true,
+): Row[] {
+	writeConfig(collapseOldTools, paseoCollapse);
 	const rows: Row[] = [];
 	let previousSummary: string | undefined;
 	const allEntries: Entry[] = [];
 	for (let r = 1; r <= rounds; r++) {
-		const body = round(r - 1, turns, toolsPerTurn);
+		const body = makeRound(r - 1, turns);
 		const sentinel = msg(`cut${r}`, "user", [{ type: "text", text: "下一轮" }]);
 		// 编号按整个 session 数：前面轮次还在 session 文件里，只是不在当前分支上
 		allEntries.push(...body, sentinel);
@@ -163,6 +225,7 @@ function measure(collapseOldTools: boolean, rounds: number, turns: number, tools
 			round: r,
 			chars: summary.length,
 			markers: (summary.match(/\(collapsed /g) ?? []).length,
+			folds: (summary.match(/^\[paseo\] /gm) ?? []).length,
 		});
 	}
 	return rows;
@@ -219,6 +282,27 @@ function headroom(rows: Row[]): Head {
 }
 const cycleHeads = cycle.map((c) => headroom(c.rows));
 
+/* ── paseo：user 侧 90% 是信封（子代理通知 / 派活回显） ── */
+
+const PASEO_ROUNDS = 4;
+const paseo = [false, true].map((collapseEnvelopes) => ({
+	collapseEnvelopes,
+	rows: measure(true, PASEO_ROUNDS, 1, 0, paseoRound, collapseEnvelopes),
+}));
+
+console.log(`## paseo workload：1 轮 = ${PASEO_AGENTS.length} 条子代理通知 + 1 条派活回显 + 1 次 MCP 调用\n`);
+console.log("| 轮次 | 不折信封 | 折信封 | 折叠行数 |");
+console.log("|---|---|---|---|");
+for (let i = 0; i < PASEO_ROUNDS; i++) {
+	const a = paseo[0].rows[i];
+	const b = paseo[1].rows[i];
+	console.log(`| ${i + 1} | ${n(a.chars)} | ${n(b.chars)} | ${b.folds} |`);
+}
+const paseoLast = paseo.map((x) => x.rows[x.rows.length - 1]);
+console.log(
+	`\n${PASEO_ROUNDS} 轮后：${n(paseoLast[0].chars)} → ${n(paseoLast[1].chars)} 字符，省 ${pct(paseoLast[0].chars, paseoLast[1].chars)}。\n`,
+);
+
 const report = {
 	windowTokens: WINDOW_TOKENS,
 	reserveTokens: RESERVE_TOKENS,
@@ -232,6 +316,12 @@ const report = {
 		growthPerRound: cycleHeads.map((h) => h.growth),
 		compactions: cycleHeads.map((h) => h.compactions),
 		turns: cycleHeads.map((h) => h.turns),
+	},
+	paseo: {
+		notificationsPerRound: PASEO_AGENTS.length,
+		envelopeBodyChars: PASEO_BODY_CHARS,
+		rounds: PASEO_ROUNDS,
+		results: paseo,
 	},
 };
 

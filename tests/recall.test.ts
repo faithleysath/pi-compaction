@@ -124,6 +124,7 @@ console.log("\n[6] !! 命令内容不外泄");
   ];
   const expandOut = await call(entries, { expand: [0] });
   check("expand 不返回 !! 的内容", !expandOut.text.includes("PRIVATE KEY"), expandOut.text);
+  check("!! 不占号：后面的普通消息就是 #0", expandOut.text.includes("#0") && expandOut.text.includes("正常消息"), expandOut.text.slice(0, 160));
   const queryOut = await call(entries, { query: "PRIVATE" });
   check("query 搜不到 !! 的内容", queryOut.text.includes("no matches"), queryOut.text);
 }
@@ -252,14 +253,14 @@ console.log("\n[11] slice：参数容错与边界");
   check("都不给要报错", (await call(entries, { slice: {} })).text.includes("give slice.message"));
 }
 
-console.log("\n[12] slice：!! 命令不泄漏，图片不重复吐");
+console.log("\n[12] slice：!! 命令不占号也不泄漏，图片不重复吐");
 {
   const entries = [
     mk("b1", "bashExecution", [], { command: "cat ~/.ssh/id_rsa", output: "PRIVATE KEY".repeat(100), exitCode: 0, cancelled: false, truncated: false, excludeFromContext: true, timestamp: 0 }),
   ];
   const out = await call(entries, { slice: { message: 0, limit: 50_000 } });
   check("slice 拿不到 !! 的内容", !out.text.includes("PRIVATE KEY"), out.text.slice(0, 200));
-  check("slice 也不报 no such entry（占号但内容排除）", !out.text.includes("no such entry"), out.text.slice(0, 120));
+  check("!! 不占号，所以 #0 根本不存在", out.text.includes("no such entry"), out.text.slice(0, 120));
 
   const imgEntries = [mk("r1", "toolResult", [{ type: "image", data: "a".repeat(500), mimeType: "image/png" }], { toolName: "read", toolCallId: "tc1" })];
   const imgOut = await call(imgEntries, { slice: { message: 0 } });

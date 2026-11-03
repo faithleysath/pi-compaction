@@ -1,8 +1,9 @@
 /**
  * pi-recall — 按 #N 回查被压缩掉的原文。配合 pi-compaction.ts 使用。
  *
- * 编号规则与 pi-compaction 完全一致：会话里第 N 个 type==="message" 条目
- * （append-only，永不复用；role:"system" 的 loadout 也占号但不渲染）。
+ * 编号规则与 pi-compaction 完全一致（规则本体在 refs.ts）：只数会进上下文的条目，
+ * 从 0 起，append-only、永不复用。`role:"system"` 的 loadout 和 `!!` 命令（excludeFromContext）
+ * 都不占号。
  *
  * 只在当前 session 内可查，且只走内存里的 getEntries()，不碰文件。
  *
@@ -11,6 +12,7 @@
 
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { numberedEntries } from "./refs.ts";
 
 const PAGE = 5;
 
@@ -38,7 +40,7 @@ const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;
 
 /** 抽一条消息里的图片块 */
 const imagesOf = (msg: any): { data: string; mimeType: string }[] => {
-	if (!msg || msg.role === "excluded") return [];
+	if (!msg) return [];
 	const c = msg.content;
 	if (!Array.isArray(c)) return [];
 	return c.filter((p: any) => p && p.type === "image" && typeof p.data === "string");
@@ -67,7 +69,6 @@ const render = (msg: any, full: boolean): string => {
 	const cap = full ? Infinity : 800;
 	const cut = (s: string) => (s.length <= cap ? s : `${s.slice(0, cap)}…(+${s.length - cap})`);
 	if (!msg) return "";
-	if (msg.role === "excluded") return "(this entry is a !! command; its content was excluded from context and is not available)";
 	// 别的扩展注入的通知：带上 customType，才能分清是后台任务还是别的东西
 	if (msg.role === "custom") return `[${msg.customType ?? "custom"} notice]\n${cut(text(msg.content))}`;
 	if (msg.role === "user") return `[user]\n${cut(text(msg.content))}`;
@@ -169,17 +170,8 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params: any, _signal, _onUpdate, ctx) {
 			const entries = ctx.sessionManager.getEntries() as any[];
-			const msgs: { n: number; msg: any }[] = [];
-			let n = 0;
-			for (const e of entries) {
-				if (e.type !== "message" || !e.message) continue;
-				// !! 命令（excludeFromContext）占号但内容不进上下文 —— 这里也不许吐
-				if (e.message.role === "bashExecution" && e.message.excludeFromContext) {
-					msgs.push({ n: n++, msg: { role: "excluded" } });
-					continue;
-				}
-				msgs.push({ n: n++, msg: e.message });
-			}
+			// 编号只数会进上下文的条目（system loadout / !! 命令不占号），和 compaction 同一套规则
+			const msgs = numberedEntries(entries).map(({ n, entry }) => ({ n, msg: entry.message }));
 			const byN = new Map(msgs.map((m) => [m.n, m.msg]));
 
 			// 扩展注入的通知（custom_message）不占 #N —— 编号空间要和 compaction 完全一致，

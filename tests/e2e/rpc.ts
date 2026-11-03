@@ -1,6 +1,8 @@
 /**
  * 极简 pi RPC 客户端：JSONL over stdin/stdout，用来驱动真实 pi 会话做端到端验证。
  */
+import { isNumbered } from "../../extensions/refs.ts";
+
 const PI = process.env.PI_BIN ?? Bun.which("pi") ?? "pi";
 
 export type Rec = any;
@@ -159,12 +161,12 @@ export const render = (msg: any): string => {
 	return `[${msg.role}]\n${text(msg.content)}`;
 };
 
-/** 消息条目编号：#N = 第 N 个 type==="message" 条目（与 pi-recall 一致） */
+/** 消息条目编号：和 pi-recall 共用 extensions/refs.ts（只数会进上下文的条目，0 起） */
 export function numberEntries(entries: Rec[]) {
 	const msgs: { n: number; entry: Rec; msg: any }[] = [];
 	let n = 0;
 	for (const e of entries) {
-		if (e.type !== "message" || !e.message) continue;
+		if (!isNumbered(e)) continue;
 		msgs.push({ n: n++, entry: e, msg: e.message });
 	}
 	const notices: { n: number; entry: Rec }[] = [];
