@@ -219,13 +219,30 @@ Agent … (标题) finished.
 
 | 原消息 | 折叠成 |
 |---|---|
-| `agent-notification` | `[paseo] <标题> notify:<event> (#N)` |
-| `agent-message` | `[paseo] <标题> from (#N)` |
-| `user-message` | `[paseo] quoted (#N)` |
+| `agent-notification` | `[paseo] <标题> (<agent id>) notify:<event> (#N)` |
+| `agent-message` | `[paseo] <标题> (<agent id>) from (#N)` |
 | 裸信封 + `Schedule … fired` | `[paseo] schedule "<名字>" fired (#N)` |
+| `user-message` | **不折** |
 
-标题取 `source-agent-title`（截 80 字符），没有就退回 `source-agent-id` 前 8 位。
-编号留在行尾：`recall #N` 取原信，或者拿 agent id 调 `mcp__paseo__get_agent_activity` 拉全过程。
+标题取 `source-agent-title`（截 80 字符），后面跟 `source-agent-id` 前 8 位。
+编号留在行尾：`recall #N` 取原信，或者拿行里的短 id 调 `mcp__paseo__get_agent_activity` 拉全过程。
+带 id 的另一个原因：合并按「标题 + id」分组，否则两个同名子代理会被合成一条 `×2`。
+
+**`user-message` 为什么不折**：paseo 的 `prepareAgentMessage()` 只有一种情况会产出它 ——
+`source` 为空、但提交内容本身长得像信封（人或别的程序粘贴了一段 `<paseo-system>`）。
+这时正文是**人的输入**，不是系统通知；折成一行就违背了「用户消息原文保留」。
+实测 769 万字符里一条都没有，但留它是错的，改掉。
+
+### 块边界必须是共享的
+
+`extensions/blocks.ts` 的 `BLOCK_START` 同时给两个折叠器用，`(collapsed …)` /
+`[background] …` / `[paseo] …` 都算结构行、各占一块。
+
+不这样会**静默吞记录**：`[paseo]` 行跟在 `→#N` 工具结果后面时，会被并进那个工具块；
+工具块被折成 `(collapsed …)` 时，`[paseo]` 行连它的 `#N` 一起消失 —— 模型不仅丢内容，
+连「这里有一条消息可以 recall」都不知道。`[background] …` 有同样的问题（这条在
+paseo 适配之前就存在）。回归测试在 `tests/paseo.test.ts` 的 `[7]`，走完整的两轮
+`session_before_compact`，不只测折叠函数本身。
 
 ### 跨轮次合并
 
@@ -261,7 +278,7 @@ Agent … (标题) finished.
 | 第 5 轮摘要 | 307,762 字符 | 223,626 字符 |
 
 合成 workload（`bun run bench`，3 条通知 + 1 条派活 / 轮，压 4 轮）：
-25,228 → 7,904 字符（−68.7%），折叠行数固定在 4 行不随轮次增长。
+25,228 → 7,948 字符（−68.5%），折叠行数固定在 4 行不随轮次增长。
 
 ### 剩下的增长
 

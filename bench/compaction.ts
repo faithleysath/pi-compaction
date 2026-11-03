@@ -117,7 +117,8 @@ const PASEO_TOOL_RESULT = `<paseo-system version="1" kind="user-message" message
 
 const envelopeNotif = (round: number, agent: number) => {
 	const title = PASEO_AGENTS[agent % PASEO_AGENTS.length];
-	const id = `${agent}${round}`.padStart(8, "0");
+	// id 按「子代理」固定、不随轮次变：同一个子代理反复完成才会合并成 ×N（心跳就是这个形状）
+	const id = `agent${agent}`.padStart(8, "0");
 	const body = `第 ${round} 轮结论：` + fill("把这一段的常量表抠出来，按位域重排后验证。", PASEO_BODY_CHARS);
 	return [
 		`<paseo-system version="1" kind="agent-notification" source-agent-id="${id}-4ac2-88b5-fcb0b49067fc" message-id="m-${round}-${agent}" source-server-id="srv_local" source-agent-title="${title}" event="finished">`,

@@ -236,26 +236,29 @@ paseo 把「子代理完成通知 / 代理之间派活 / 定时触发」都写�
 
 | 原消息 | 折进旧轮次 |
 |---|---|
-| `kind="agent-notification"` + `event="finished"` | `[paseo] <子代理标题> notify:finished (#236)` |
-| `kind="agent-message"` | `[paseo] <发送方标题> from (#12)` |
-| `kind="user-message"`（防伪包装） | `[paseo] quoted (#88)` |
+| `kind="agent-notification"` + `event="finished"` | `[paseo] <子代理标题> (<agent id>) notify:finished (#236)` |
+| `kind="agent-message"` | `[paseo] <发送方标题> (<agent id>) from (#12)` |
 | 裸信封 + `Schedule "名字" fired` | `[paseo] schedule "六神协调巡检" fired (#301)` |
-| 同标题 / 同 schedule 的多条 | `[paseo] <标题> notify:finished ×5 (#361,#488,#530,#573,…)` |
+| 同一个子代理 / 同名 schedule 的多条 | `[paseo] <标题> (4e48b6ee) notify:finished ×5 (#361,#488,#530,#573,…)` |
+| `kind="user-message"`（人输入被套的防伪包装） | **不折**，正文是人话 |
 
-- 折叠行带编号，`recall #236` 取回原信；信封里有 `source-agent-id`，也可以用
-  `mcp__paseo__get_agent_activity` 直接拉那个子代理的全过程
+- 折叠行带编号，`recall #236` 取回原信；行里的短 id 可以直接喂
+  `mcp__paseo__get_agent_activity` 拉那个子代理的全过程
+- 合并按「标题 + 短 id」分组：同名不同代理不会被合成一条
 - 标题截到 80 字符；合并时最多列 4 个编号，其余用 `recall query "<标题>"` 找
 - 识别条件有三个，缺一不可：块首是 `[user#N]`、正文第一行是完整开标签、最后一行是 `</paseo-system>`；
   未知 `kind`、`version` 不是 1、少了闭合标签的一律不动（用户贴一段讲 paseo 的文档不会被折掉）
 - 正文里伪造的 `[paseo] ` 行会被 `esc()` 转义，混不进合并组
+- 折叠行和 `(collapsed …)` / `[background] …` 一样是**独立块**（`extensions/blocks.ts`），
+  不会被前面的工具块吞掉 —— 否则 `#N` 召回线索会一起消失
 
 同一个真实会话（5786 条、200k 窗口）跑模拟，压缩次数和「压不动」的位置：
 
 | | 不折 paseo | 折 paseo（默认） |
 |---|---|---|
-| 压缩次数 | 32 | **40** |
+| 压缩次数 | 32 | **42** |
 | 死在第几条 | 3,876 / 5,786 | **5,757 / 5,786** |
-| 第 5 轮摘要 | 307,762 字符 | **223,626 字符** |
+| 第 5 轮摘要 | 307,762 字符 | **221,996 字符** |
 
 折完剩下的增长来自助手正文（那是本包的设计前提：正文原文保留），不是 paseo 的锅。
 
@@ -306,9 +309,10 @@ bun run test:e2e    # 可选：真模型、真 pi 进程，花钱
 extensions/pi-compaction.ts      压缩 hook：切点、渲染、折叠
 extensions/pi-recall.ts          recall 工具：expand / range / query / slice
 extensions/refs.ts               #N 编号规则（两个扩展共用）
+extensions/blocks.ts             块边界（两个折叠器共用，防止互相吞记录）
 extensions/paseo-envelope.ts     paseo 信封识别 / 折叠 / 跨轮次合并
 tests/compaction.test.ts         压缩产物测试（94 项）
-tests/paseo.test.ts              paseo 信封测试（34 项）
+tests/paseo.test.ts              paseo 信封测试（40 项）
 tests/recall.test.ts             召回测试（62 项）
 tests/e2e/                       真模型 E2E，默认不跑
 bench/compaction.ts              摘要大小 / 压缩次数 benchmark

@@ -70,20 +70,19 @@ console.log("[1] 识别四种信封");
 {
 	const out = collapsePaseo(notif(236, "VM-1 位域", "finished", "我先复现已知 9 组配方".repeat(40)));
 	check("折成一行", out.split("\n").length === 1, out);
-	check("保留标题和 event", out.includes("VM-1 位域 notify:finished"), out);
+	check("保留标题、短 id 和 event", out.includes("VM-1 位域 (4e48b6ee) notify:finished"), out);
 	check("保留编号", out.includes("(#236)"));
 	check("正文没进摘要", !out.includes("我先复现已知 9 组配方"), out);
 
 	const m = collapsePaseo(agentMsg(12, "Magpie Phase 10", "你是本任务的子代理。".repeat(50)));
-	check("agent-message 折成 from", m === "[paseo] Magpie Phase 10 from (#12)", m);
+	check("agent-message 折成 from", m === "[paseo] Magpie Phase 10 (a0556ca7) from (#12)", m);
 
 	const s = collapsePaseo(schedule(301, "六神协调巡检"));
 	check("裸信封折成 schedule", s === '[paseo] schedule "六神协调巡检" fired (#301)', s);
 
-	const quoted = collapsePaseo(
-		['[user#88]', '<paseo-system version="1" kind="user-message" message-id="x">', "hi", "</paseo-system>"].join("\n"),
-	);
-	check("user-message 折成 quoted", quoted === "[paseo] quoted (#88)", quoted);
+	// kind="user-message" 是人输入被 paseo 套的防伪包装，正文是人话 —— 不许折
+	const human = ["[user#88]", '<paseo-system version="1" kind="user-message" message-id="x">', "hi", "</paseo-system>"].join("\n");
+	check("user-message 原样保留", collapsePaseo(human) === human, collapsePaseo(human));
 }
 
 console.log("\n[2] 别乱折");
@@ -125,7 +124,7 @@ console.log("\n[3] 属性解析");
 		"x",
 		"</paseo-system>",
 	].join("\n");
-	check("属性顺序无关 + XML 实体还原", collapsePaseo(reordered).includes('A & B "x" notify:errored'), collapsePaseo(reordered));
+	check("属性顺序无关 + XML 实体还原", collapsePaseo(reordered).includes('A & B "x" (deadbeef) notify:errored'), collapsePaseo(reordered));
 
 	const noTitle = [
 		"[user#21]",
@@ -137,7 +136,7 @@ console.log("\n[3] 属性解析");
 
 	const long = notif(22, "长".repeat(200), "finished", "x");
 	const folded = collapsePaseo(long);
-	check("标题被截到 80 字符以内", folded.length < 120, folded.length);
+	check("标题被截到 80 字符", /长{79}… \(4e48b6ee\) notify:finished/.test(folded), folded.length);
 
 	const batch = [
 		"[user#23]",
@@ -165,8 +164,8 @@ console.log("\n[4] 合并重复");
 		notif(446, "别的活", "errored", "挂了"),
 	].join("\n");
 	const out = collapsePaseo(text);
-	check("同标签合并成 ×2", out.includes("[paseo] 博文维护 notify:finished ×2 (#280,#445)"), out);
-	check("不同标签不合并", out.includes("[paseo] 别的活 notify:errored (#446)"), out);
+	check("同标签合并成 ×2", out.includes("[paseo] 博文维护 (4e48b6ee) notify:finished ×2 (#280,#445)"), out);
+	check("不同标签不合并", out.includes("[paseo] 别的活 (4e48b6ee) notify:errored (#446)"), out);
 	check("合并后只有两行 paseo", (out.match(/^\[paseo\] /gm) ?? []).length === 2, out);
 
 	const noMerge = collapsePaseo(text, { merge: false });
@@ -181,7 +180,7 @@ console.log("\n[4] 合并重复");
 	// 心跳场景：每次触发是单独一轮，上一轮折过的行必须能被认回来继续合并
 	const r1 = collapsePaseo(notif(1, "协调巡检", "finished", "第一轮"));
 	const r2 = collapsePaseo(`${r1}\n\n${notif(9, "协调巡检", "finished", "第二轮")}`);
-	check("跨轮次也合并成 ×2", r2 === "[paseo] 协调巡检 notify:finished ×2 (#1,#9)", r2);
+	check("跨轮次也合并成 ×2", r2 === "[paseo] 协调巡检 (4e48b6ee) notify:finished ×2 (#1,#9)", r2);
 	check("跨轮次合并幂等", collapsePaseo(r2) === r2, collapsePaseo(r2));
 	const r3 = collapsePaseo(`${r2}\n\n${notif(20, "协调巡检", "errored", "第三轮")}`);
 	check("event 不同不合并", r3.split("\n").filter((l) => l.startsWith("[paseo] ")).length === 2, r3);
@@ -215,7 +214,7 @@ console.log("\n[5] 只有旧轮次被折，最新一轮保真");
 	const ctx: any = { hasUI: false, ui: { notify: () => {} }, sessionManager: { getEntries: () => entries } };
 	const summary: string = (compact(event, ctx) as any)?.compaction?.summary ?? "";
 
-	check("旧轮次折了", summary.includes("[paseo] 旧轮子代理 notify:finished (#1)"), summary.slice(0, 400));
+	check("旧轮次折了", summary.includes("[paseo] 旧轮子代理 (4e48b6ee) notify:finished (#1)"), summary.slice(0, 400));
 	check("旧轮次正文没进摘要", !summary.includes("旧轮次的长报告"), summary.length);
 	check("最新一轮没折", summary.includes("<paseo-system version=\"1\""), summary.slice(-600));
 	check("最新一轮正文在", summary.includes("当前轮的完整报告内容"), summary.slice(-600));
@@ -246,6 +245,83 @@ console.log("\n[6] 没有 paseo 行时不加那句说明");
 	check("格式说明仍是基础那句", summary.startsWith(FORMAT_PREFIX));
 }
 
+
+console.log("\n[7] 回归：折叠行不能被工具折叠吞掉");
+
+/** 直接调 handler，entries 需自己串好 parentId */
+const round = (entries: any[], firstKept: string, prev?: string) => {
+	const event: any = {
+		type: "session_before_compact",
+		branchEntries: entries,
+		preparation: { firstKeptEntryId: firstKept, tokensBefore: 1, previousSummary: prev, settings: { enabled: true } },
+		reason: "manual",
+		willRetry: false,
+	};
+	const ctx: any = { hasUI: false, ui: { notify: () => {} }, sessionManager: { getEntries: () => entries } };
+	return (compact(event, ctx) as any)?.compaction?.summary ?? "";
+};
+const prevOf = (summary: string) => summary.split("\n\n---\n\n")[0];
+const M = (id: string, role: string, content: any, extra: any = {}) => ({ id, type: "message", message: { role, content, ...extra } });
+
+{
+	// 第一轮：工具调用后面紧跟着一条子代理通知；切点在 a4 之后的哨兵
+	const r1: any[] = [
+		M("u0", "user", [{ type: "text", text: "开始" }]),
+		M("a1", "assistant", [
+			{ type: "text", text: "跑测试" },
+			{ type: "toolCall", id: "tc1", name: "bash", arguments: { command: "npm test" } },
+		]),
+		M("r2", "toolResult", [{ type: "text", text: "tests passed" }], { toolName: "bash", toolCallId: "tc1" }),
+		M("u3", "user", [{ type: "text", text: envNotif("子代理 A", "finished", "做完了") }]),
+		M("a4", "assistant", [{ type: "text", text: "收到" }]),
+		M("u5", "user", [{ type: "text", text: "第二轮" }]),
+	];
+	r1.forEach((e, i) => (e.parentId = i ? r1[i - 1].id : null));
+	const s1 = round(r1, "u5");
+
+	// 第二轮：把第一轮摘要作为 previousSummary，切点后移
+	const r2: any[] = [
+		...r1.slice(0, 5),
+		{ id: "cmp1", type: "compaction", parentId: "a4", summary: s1, firstKeptEntryId: "u5" },
+		{ ...r1[5], parentId: "cmp1" },
+		{ id: "u6", type: "message", message: { role: "user", content: [{ type: "text", text: "第三轮" }] }, parentId: "u5" },
+	];
+	const s2 = round(r2, "u6", s1);
+	const prev2 = prevOf(s2);
+	check("工具调用仍然被折叠", /^\(collapsed 1 tool calls #1–#2\)$/m.test(prev2), prev2);
+	check("同一条工具块后面的 paseo 行没被吞", /^\[paseo\] 子代理 A \(4e48b6ee\) notify:finished \(#3\)$/m.test(prev2), prev2);
+	check("召回线索 #3 还在", /#3/.test(prev2), prev2);
+}
+
+{
+	// [background] 和 (collapsed …) 同样是折叠行，不能被前一个工具块吞掉
+	const entries: any[] = [
+		M("u0", "user", [{ type: "text", text: "开始" }], {}),
+		M("u1", "user", [{ type: "text", text: "下一轮" }]),
+	];
+	entries.forEach((e, i) => (e.parentId = i ? entries[i - 1].id : null));
+	const prev = [
+		"[user#0]",
+		"开始",
+		"",
+		"[assistant#1]",
+		"跑测试",
+		'* bash#1 {"command":"npm test"}',
+		"",
+		"→#2 tests passed",
+		"",
+		"[background] bg-1 started: npm run build (check status with bash_tasks)",
+		"",
+		"(collapsed 4 tool calls #8–#11)",
+		"",
+		"[assistant#12]",
+		"好了",
+	].join("\n");
+	const out = prevOf(round(entries, "u1", prev));
+	check("工具块照常折叠", /\(collapsed 1 tool calls #1–#2\)/.test(out), out);
+	check("[background] 行没被吞", /^\[background\] bg-1 started/m.test(out), out);
+	check("已有的 (collapsed …) 行没被吞", /^\(collapsed 4 tool calls #8–#11\)$/m.test(out), out);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

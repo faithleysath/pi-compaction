@@ -189,19 +189,19 @@
           },
           {
             "round": 2,
-            "chars": 7362,
+            "chars": 7406,
             "markers": 2,
             "folds": 4
           },
           {
             "round": 3,
-            "chars": 7639,
+            "chars": 7683,
             "markers": 3,
             "folds": 4
           },
           {
             "round": 4,
-            "chars": 7904,
+            "chars": 7948,
             "markers": 4,
             "folds": 4
           }

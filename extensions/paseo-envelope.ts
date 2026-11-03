@@ -23,13 +23,14 @@
  *     …prompt…
  *     </paseo-system>
  *
- * 折叠产物是**非条目行**（不占 #N、不会被下一轮再认一次）：`[paseo] <标题> <动词> (#N)`。
+ * 折叠产物是**非条目行**（不占 #N、不会被下一轮再认一次）：`[paseo] <标题> (<agent>) <动词> (#N)`。
  * 同一标题 / 同名 schedule 的多条会合并成 `×N (#a,#b,…)` —— 心跳一天几十次，不合并等于没折。
  * 合并是跨轮次的：上一轮已经折过的行这一轮会被重新分组，所以 96 条心跳最终只剩一行。
  */
 
-/** 块边界。必须和 pi-compaction 里 collapseToolBlocks 的 NEW_BLOCK 保持一致 */
-const BLOCK_START = /^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #])|---\s*$)/;
+import { splitBlocks } from "./blocks.ts";
+
+/** 块边界：和工具折叠共用（blocks.ts），否则两边的折叠会互相吞记录 */
 const HEADER = /^\[user#(\d+)\]$/;
 const VERSIONED_OPEN = /^<paseo-system((?:\s+[a-z-]+="[^"<>]*")+)>$/;
 const BARE_OPEN = /^<paseo-system>$/;
@@ -51,20 +52,6 @@ const attr = (attrs: string, name: string) => {
 const MAX_IDS = 4;
 
 const idsOf = (s: string) => (s.match(/#(\d+)/g) ?? []).map((x) => Number(x.slice(1)));
-
-const splitBlocks = (text: string): string[][] => {
-	const blocks: string[][] = [];
-	let cur: string[] | null = null;
-	for (const line of text.split("\n")) {
-		if (BLOCK_START.test(line)) {
-			if (cur) blocks.push(cur);
-			cur = [line];
-		} else if (cur) cur.push(line);
-		else cur = [line];
-	}
-	if (cur) blocks.push(cur);
-	return blocks;
-};
 
 const cleanTitle = (raw: string | undefined, max: number) => {
 	const one = (raw ?? "").replace(/\s+/g, " ").trim();
@@ -102,14 +89,16 @@ const parseEnvelope = (header: string, body: string[], maxTitle: number): string
 		const more = batch > 1 ? ` (+${batch - 1} more)` : "";
 		const title = cleanTitle(attr(attrs, "source-agent-title"), maxTitle);
 		const id = (attr(attrs, "source-agent-id") ?? "").slice(0, 8);
-		const who = title || id || "agent";
+		// 带上短 id：同名不同代理不会被合并成一条，也能直接拿去 get_agent_activity
+		const who = title && id ? `${title} (${id})` : title || id || "agent";
 		if (kind === "agent-notification") {
 			const event = attr(attrs, "event");
 			return `[paseo] ${who} notify${event ? `:${event}` : ""}${more} (#${num})`;
 		}
 		if (kind === "agent-message") return `[paseo] ${who} from${more} (#${num})`;
-		if (kind === "user-message") return `[paseo] quoted${more} (#${num})`;
-		// 未知 kind：可能是 paseo 以后加的，别乱折
+		// kind="user-message" 是 paseo 给**人**输入加的防伪包装（源码 prepareAgentMessage：
+		// source 为空、但提交内容长得像信封时才包）。正文是人话，不是系统通知 ——
+		// 折掉就违背了「用户消息原文保留」，所以整块不动。
 		return null;
 	}
 

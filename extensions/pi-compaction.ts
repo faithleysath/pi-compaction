@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildSessionProjection, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { BLOCK_START } from "./blocks.ts";
 import { collapsePaseo } from "./paseo-envelope.ts";
 import { buildRefs } from "./refs.ts";
 
@@ -156,10 +157,11 @@ const text = (c: unknown): string =>
  *
  * 只处理 `* name#N ...` 和 `→#N ...` 开头的块。正文里长得像条目的行早被 esc()
  * 加了反斜杠，不会误伤（`\* ` 不匹配 `^\* `）。
+ *
+ * 块边界和 paseo 折叠共用 blocks.ts：`(collapsed …)` / `[background] …` / `[paseo] …`
+ * 也是结构行，各占一块。少了这一条，它们会被前一个工具块吸进去、跟着被折没（召回线索一起丢）。
  */
 const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: number; hi: number }) => string) => {
-	// 一个块 = 一个条目，从「行首是结构标记」到下一个结构标记为止
-	const NEW_BLOCK = /^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #])|---\s*$)/;
 	const isToolLine = (l: string) => /^(\* |→(?=[ #]))/.test(l);
 
 	/**
@@ -186,7 +188,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 	const blocks: Block[] = [];
 	let cur: Block | null = null;
 	for (const line of lines) {
-		if (NEW_BLOCK.test(line)) {
+		if (BLOCK_START.test(line)) {
 			if (cur) blocks.push(cur);
 			cur = { tool: isToolLine(line), lines: [line] };
 		} else if (cur) cur.lines.push(line);
