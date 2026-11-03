@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>334 行 pi 压缩扩展 · 动画解读</title>
+<title>337 行 pi 压缩扩展 · 动画解读</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#11161f; --panel2:#0e131b; --line:#1e2633;
@@ -199,7 +199,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>334 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
+    <h1>337 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
     <div class="nav">
       <div class="dots" id="dots"></div>
       <button id="prev">←</button>
@@ -359,7 +359,10 @@ const esc = (s: string) =>
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
 		// 假结构行：[user#12] / [assistant] / * bash#3 / →#4 一律转义，免得伪装成真条目
-		.replace(/^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #]))/gm, "\\$1");
+		.replace(/^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #]))/gm, "\\$1")
+		// 正文里独立成行的 ---：它不是轮分隔符，不转义会被折叠函数当块边界，
+		// 把一条工具结果劈成两半（后半截丢掉 →#N 前缀，裸着掉出来）
+		.replace(/^---\s*$/gm, "\\---");
 
 /**
  * 摘要开头的一行格式说明。实测（本机 24 次）：不加时模型只有 ~60% 能分清
@@ -503,7 +506,7 @@ const makeRender =
 				// 用户敲的 ! 命令：命令原文，输出头+尾截断
 				// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
 				if (msg.excludeFromContext) continue;
-				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipResult(msg.output ?? "")}`);
+				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipResult(esc(msg.output ?? ""))}`);
 				continue;
 			}
 			for (const m of convertToLlm([msg])) {
