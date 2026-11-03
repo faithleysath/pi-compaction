@@ -94,7 +94,7 @@ console.log("\n[3] expand 文本预算");
   const entries = [mk("r0", "toolResult", T(big), { toolName: "bash", toolCallId: "tc0" })];
   const out = await call(entries, { expand: [0] });
   check("10 万字符的单条被截断", out.text.length < 70_000, out.text.length);
-  check("给了截断提示", out.text.includes("文本上限"), out.text.slice(-200));
+  check("给了截断提示", out.text.includes("char limit"), out.text.slice(-200));
 }
 
 console.log("\n[4] 批量 expand 受总预算约束");
@@ -103,7 +103,7 @@ console.log("\n[4] 批量 expand 受总预算约束");
     mk(`r${i}`, "toolResult", T("w".repeat(20_000)), { toolName: "bash", toolCallId: `tc${i}` }));
   const out = await call(entries, { expand: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] });
   check("10×2 万字符被预算截住", out.text.length < 75_000, out.text.length);
-  check("提示了截断条数", /（\d+ 条因超出单次文本上限/.test(out.text), out.text.slice(-200));
+  check("提示了截断条数", /\(\d+ entries were truncated at the/.test(out.text), out.text.slice(-200));
 }
 
 console.log("\n[5] 图片上限");
@@ -175,12 +175,12 @@ console.log(`\n[9] slice：单条无损分块`);
   check("确实分了多块", all.calls > 1, all.calls);
   check("offset 每步严格递增", all.monotonic, all.offsets);
   check("末块 has_more:false 且 next_offset:null", /has_more: false/.test(all.last) && /next_offset: null/.test(all.last), all.last.slice(0, 160));
-  check("末块带“读完了”提示", all.last.includes("已到末尾"));
+  check("末块带“读完了”提示", all.last.includes("end of this entry"));
 
   const half = await call(entries, { slice: { message: 0, offset: 20_000, limit: 20_000 } });
   check("返回头含 total/offset/next_offset/has_more",
     /total_chars: \d+/.test(half.text) && /offset: 20000/.test(half.text) && /next_offset: \d+/.test(half.text) && /has_more: true/.test(half.text), half.text.slice(0, 200));
-  check("给了可执行的继续调用", /继续：\{"slice":\{"message":0,"offset":\d+\}\}/.test(half.text), half.text.slice(-120));
+  check("给了可执行的继续调用", /next: \{"slice":\{"message":0,"offset":\d+\}\}/.test(half.text), half.text.slice(-120));
   check("正文用 CONTENT 包裹", half.text.includes("--- CONTENT START ---") && half.text.includes("--- CONTENT END ---"));
 }
 
@@ -209,7 +209,7 @@ console.log("\n[10] slice：换行对齐 / emoji 边界 / 必须有进展");
 
   // 手写的 offset 落在代理对中间：退到高代理项，并在元数据里报实际 offset
   const mid = await call(eEntries, { slice: { message: 0, offset: 8, limit: 5 } });
-  check("手动 offset 落在 emoji 中间时已对齐", mid.text.includes("offset: 7") && mid.text.includes("已对齐"), mid.text.slice(0, 220));
+  check("手动 offset 落在 emoji 中间时已对齐", mid.text.includes("offset: 7") && mid.text.includes("snapped"), mid.text.slice(0, 220));
   check("对齐后正文不含孤立代理项", !hasLoneSurrogate(bodyOf(mid.text)), mid.text.slice(0, 200));
 
   // 任意 offset（含每一个中间码元）都不应吐出孤立代理项
@@ -239,13 +239,13 @@ console.log("\n[11] slice：参数容错与边界");
   check("小数向下取整", (await call(entries, { slice: { message: 0, offset: 4.9 } })).text.includes("offset: 4"));
   check("负数 offset 夹到 0", (await call(entries, { slice: { message: 0, offset: -50 } })).text.includes("offset: 0"));
   const clamped = await call(entries, { slice: { message: 0, limit: 999_999 } });
-  check("limit 被夹到 50000 并说明", clamped.text.includes("已夹到 50000"), clamped.text.slice(0, 200));
+  check("limit 被夹到 50000 并说明", clamped.text.includes("clamped to 50000"), clamped.text.slice(0, 200));
   const zero = await call(entries, { slice: { message: 0, limit: 0 } });
   check("limit:0 用默认值而不是空块", /returned_chars: (?!0$)\d+/.test(zero.text), zero.text.slice(0, 200));
   const atEnd = await call(entries, { slice: { message: 0, offset: total } });
   check("offset === total：空内容 + has_more:false", atEnd.text.includes("returned_chars: 0") && atEnd.text.includes("has_more: false"), atEnd.text.slice(0, 200));
   const past = await call(entries, { slice: { message: 0, offset: total + 99 } });
-  check("offset 越界有明确提示", past.text.includes("超出总长度") && past.text.includes("has_more: false"), past.text.slice(0, 200));
+  check("offset 越界有明确提示", past.text.includes("is past total_chars") && past.text.includes("has_more: false"), past.text.slice(0, 200));
   check("编号不存在报 no such entry", (await call(entries, { slice: { message: 999 } })).text.includes("no such entry"));
   check("notice 不存在报 no such notification", (await call(entries, { slice: { notice: 7 } })).text.includes("no such notification"));
   check("message 和 notice 同时给要报错", (await call(entries, { slice: { message: 0, notice: 0 } })).text.includes("exactly one"));
@@ -277,7 +277,7 @@ console.log("\n[13] 截断提示必须精确到具体条目、且可执行");
   check("#2 的提示用自己的编号和已给字符数", out.text.includes(`{"slice":{"message":2,"offset":${wantOffset}}}`), { wantOffset, tail: out.text.slice(-300) });
   check("提示可执行：按它取下一块，正好接上",
     (await call(entries, { slice: { message: 2, offset: wantOffset, limit: 20_000 } })).text.includes(fulls[2].slice(wantOffset, wantOffset + 50)));
-  check("批量截断汇总不再建议“更小的 expand”", !out.text.includes("更小的 expand"), out.text.slice(-200));
+  check("批量截断汇总给出可执行的续读提示", out.text.includes("slice call to continue") && !out.text.includes("smaller expand"), out.text.slice(-200));
 
   // 自动配对的 toolResult 用自己的 #N
   const paired = [

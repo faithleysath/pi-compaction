@@ -7,7 +7,7 @@ pi 默认压缩是把旧对话喂给模型写一段摘要。这个包把同一�
 只把「切点之前的部分」从 LLM 摘要换成规则渲染 —— 用户消息原文保留、助手正文原文保留、
 thinking 丢弃、工具参数和结果截断。被裁掉的东西都能用 `#N` 编号回查。
 
-多轮压缩时，旧轮次的工具调用会被折叠成一行「（调用工具 7 次 #2–#10）」，
+多轮压缩时，旧轮次的工具调用会被折叠成一行「(collapsed 7 tool calls #2–#10)」，
 只有最新一轮保留完整细节 —— 摘要因此不会随轮次线性膨胀。
 
 ## 装
@@ -32,7 +32,7 @@ pi install git:github.com/faithleysath/pi-compaction
 ## 摘要长什么样
 
 ```
-格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本。
+Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text.
 
 [user#1]
 修一下 auth：reset 之后 refresh token 没更新
@@ -55,7 +55,7 @@ pi install git:github.com/faithleysath/pi-compaction
 M src/auth/session.ts
 
 ---
-可用 recall 工具按 #N 取原文；图片可加 image:true 取回。
+Fetch the original text of any #N with the recall tool; add image:true to get images back.
 ```
 
 六种条目：
@@ -121,14 +121,14 @@ M src/auth/session.ts
 
 | 消息 | 当前轮次 | 折叠进旧轮次 |
 |---|---|---|
-| 完成通知 `pi-bg-bash` | 保留头部 4 行（任务 ID / 状态 / 命令），正文头尾截断 | `[background] bg-1 完成：exited (code 0)` |
-| 持续输出 `pi-bg-bash-output` | 保留头部（task / seq / records），正文头尾截断 | `[background] bg-3 输出批次 ×N` |
+| 完成通知 `pi-bg-bash` | 保留头部 4 行（任务 ID / 状态 / 命令），正文头尾截断 | `[background] bg-1 finished: exited (code 0)` |
+| 持续输出 `pi-bg-bash-output` | 保留头部（task / seq / records），正文头尾截断 | `[background] bg-3 output batch ×N` |
 | 其他扩展的通知 | 同样按「头部 4 行 + 头尾截断」 | 不动 |
 
 折叠掉工具调用时，如果那段里有 `Started background task bg-1`，会额外补一行：
 
 ```
-（调用工具 3 次 #12–#17）
+(collapsed 3 tool calls #12–#17)
 
 [background] bg-1 启动：npm run build（状态用 bash_tasks 查）
 ```
@@ -142,7 +142,7 @@ M src/auth/session.ts
 折叠后变成：
 
 ```
-（调用工具 4 次 #2–#5）
+(collapsed 4 tool calls #2–#5)
 
 [background] bg-1 启动：npm run build（状态用 bash_tasks 查）
 [background] bg-2 启动：npm test（状态用 bash_tasks 查）
@@ -176,7 +176,7 @@ M src/auth/session.ts
 [user#1]
 修一下 auth：reset 之后 refresh token 没更新
 
-（调用工具 7 次 #2–#10）
+(collapsed 7 tool calls #2–#10)
 
 [assistant#11]
 研究完了，脚手架已经写好……
@@ -184,7 +184,7 @@ M src/auth/session.ts
 [user#12]
 先看下 pi-vcc 怎么写的
 
-（调用工具 26 次 #13–#55）
+(collapsed 26 tool calls #13–#55)
 ```
 
 - **用户消息和助手正文一字不动**

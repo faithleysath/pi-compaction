@@ -112,8 +112,8 @@ console.log("[1] 基本：切点来自 preparation");
   check("工具结果带头尾（exit code 可见）", s.includes("EXITCODE_TAIL"));
   check("带 #N 编号", /\[user#\d+\]/.test(s));
   check("tokensBefore 透传", res?.compaction?.tokensBefore === 123456);
-  check("格式说明在开头", s.startsWith("格式：以 [user#N]"));
-  check("尾注只有一份", (s.match(/可用 recall 工具按 #N 取原文/g) ?? []).length === 1);
+  check("格式说明在开头", s.startsWith("Format: a line starting with [user#N]"));
+  check("尾注只有一份", (s.match(/Fetch the original text of any #N/g) ?? []).length === 1);
 }
 
 console.log("\n[2] 切点在第一条 → cancel");
@@ -149,8 +149,8 @@ console.log("\n[4] 多轮：不重复渲染上一轮已折叠的内容");
   const s2: string = c2.res.compaction.summary;
   check("第一轮的内容只出现 1 次", (s2.match(/U0 u/g) ?? []).length === 1, (s2.match(/U0 u/g) ?? []).length);
   check("第二轮新内容在", s2.includes("第二轮新内容 0"));
-  check("格式说明只有一份", (s2.match(/格式：以 \[user#N\]/g) ?? []).length === 1);
-  check("尾注只有一份", (s2.match(/可用 recall 工具按 #N 取原文/g) ?? []).length === 1);
+  check("格式说明只有一份", (s2.match(/Format: a line starting with \[user#N\]/g) ?? []).length === 1);
+  check("尾注只有一份", (s2.match(/Fetch the original text of any #N/g) ?? []).length === 1);
   check("摘要没爆炸", s2.length < s1.length * 3, [s1.length, s2.length]);
 }
 
@@ -257,7 +257,7 @@ console.log("\n[9c] 折叠旧轮次的工具调用");
   const c1 = run(r1, { keepTokens: 1000 });
   const s1: string = c1.res.compaction.summary;
   check("第 1 轮保留工具细节", s1.includes("* bash#") && s1.includes("→#"));
-  check("第 1 轮没有折叠标记", !/（调用工具 \d+ 次 #/.test(s1));
+  check("第 1 轮没有折叠标记", !/\(collapsed \d+ tool calls #/.test(s1));
 
   // 第 2 轮：拿 s1 当 previousSummary
   const kep = c1.res.compaction.firstKeptEntryId;
@@ -272,12 +272,12 @@ console.log("\n[9c] 折叠旧轮次的工具调用");
   const c2 = run(r2, { prev: s1, keepTokens: 1000 });
   const s2: string = c2.res.compaction.summary;
 
-  check("旧轮次的工具调用被折叠", /（调用工具 \d+ 次 #\d+–#\d+）/.test(s2), s2.match(/（调用工具[^）]*）/g)?.slice(0, 3));
+  check("旧轮次的工具调用被折叠", /\(collapsed \d+ tool calls #\d+–#\d+\)/.test(s2), s2.match(/\(collapsed[^)]*\)/g)?.slice(0, 3));
   check("旧轮次的 * bash 行没了", (s2.match(/\* bash#/g) ?? []).length === 3, (s2.match(/\* bash#/g) ?? []).length);
   check("最新一轮仍保留 * bash 行", s2.includes('* bash#') && s2.includes("cmd 2-"));
   check("用户消息原文仍在", s2.includes("[user#") && s2.includes("第1轮需求"));
   check("助手正文原文仍在", s2.includes("第1轮第0步") && s2.includes("第1轮完成"));
-  check("折叠说明写进了格式说明", s2.includes("（调用工具 N 次 #a–#b）"));
+  check("折叠说明写进了格式说明", s2.includes("(collapsed N tool calls #a–#b)"));
 }
 
 console.log("\n[9d] 正文里的 --- 不许劈开工具块");
@@ -297,16 +297,16 @@ console.log("\n[9d] 正文里的 --- 不许劈开工具块");
   const first = run(entries, { reason: "manual", firstKept: "u5" });
   const s1: string = first.res?.compaction?.summary ?? "";
   check("第一轮：正文 --- 被转义成 \\---", s1.includes("\\---"), s1.slice(0, 400));
-  check("第一轮：没有裸 ---", !/^---$/m.test(s1.replace(/\n\n---\n\n/g, "\n\n").replace(/\n\n---\n可用 recall/, "\n\n")));
+  check("第一轮：没有裸 ---", !/^---$/m.test(s1.replace(/\n\n---\n\n/g, "\n\n").replace(/\n\n---\nFetch the original text/, "\n\n")));
 
   // 第二轮：previousSummary = 第一轮摘要
   const more = [...entries, user("u9", "第4轮"), asst("a10", "好"), user("u11", "第5轮"), asst("a12", "好")];
   const second = run(more, { reason: "manual", firstKept: "u9", prev: s1 });
   const s2: string = second.res?.compaction?.summary ?? "";
   check("第二轮：工具块整体折进去（不留裸 ---）", !/^---\n17:import/m.test(s2));
-  check("第二轮：不存在裸 --- 后面跟孤儿文本", !/^---\n(?!\[|（调用工具|\* |→|可用 recall|$)/m.test(s2), s2.slice(0, 900));
+  check("第二轮：不存在裸 --- 后面跟孤儿文本", !/^---\n(?!\[|\(collapsed|\* |→|Fetch the original text|$)/m.test(s2), s2.slice(0, 900));
   check("第二轮：正文里 17:import 仍挂在 \\--- 之后（最新一轮保留原文）", s2.includes("\\---\n17:import"));
-  check("第二轮：折叠标记存在", /（调用工具 \d+ 次 #/.test(s2));
+  check("第二轮：折叠标记存在", /\(collapsed \d+ tool calls #/.test(s2));
 }
 
 console.log("\n[9e] projection：context_edit 省略/替换必须被尊重");
@@ -440,10 +440,10 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
     [{ id: "tcB", name: "bash", args: { command: "npm run build", background: true } }],
     [{ tc: "tcB", text: S("bg-1") }],
   ));
-  check("渲染阶段就把命令写进结果行", one.s1.includes("Started background task bg-1（cmd: npm run build）"), one.s1.slice(0, 200));
-  check("去掉「别轮询」那段废话之外的重复提示保留", one.s1.includes("完成时自动通知，别轮询"));
+  check("渲染阶段就把命令写进结果行", one.s1.includes("Started background task bg-1 (cmd: npm run build)"), one.s1.slice(0, 200));
+  check("去掉「别轮询」那段废话之外的重复提示保留", one.s1.includes("completion arrives automatically, do not poll"));
   check("折叠后记得 bg-1", one.bg.some((l: string) => l.includes("bg-1")), one.bg);
-  check("折叠后带着正确命令", one.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), one.bg);
+  check("折叠后带着正确命令", one.bg.some((l: string) => /bg-1 started: npm run build/.test(l)), one.bg);
   check("提示状态要用 bash_tasks 查", one.s2.includes("bash_tasks"));
 
   // 串行两个后台任务
@@ -454,8 +454,8 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
     ],
     [{ tc: "tc1", text: S("bg-1") }, { tc: "tc2", text: S("bg-2") }],
   ));
-  check("串行：bg-1 配 build", seq.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), seq.bg);
-  check("串行：bg-2 配 test", seq.bg.some((l: string) => /bg-2 启动：npm test/.test(l)), seq.bg);
+  check("串行：bg-1 配 build", seq.bg.some((l: string) => /bg-1 started: npm run build/.test(l)), seq.bg);
+  check("串行：bg-2 配 test", seq.bg.some((l: string) => /bg-2 started: npm test/.test(l)), seq.bg);
 
   // 并行：bash + read，read 的结果先返回（审计指出的错位场景）
   const par = twice(session(
@@ -465,8 +465,8 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
     ],
     [{ tc: "tcR", text: "文件内容" }, { tc: "tcB", text: S("bg-1") }],
   ));
-  check("混合并行：read 抢不走 bash 的命令", par.bg.some((l: string) => /bg-1 启动：npm run build/.test(l)), par.bg);
-  check("混合并行：不会产出空命令记录", !par.bg.some((l: string) => /启动（/.test(l)), par.bg);
+  check("混合并行：read 抢不走 bash 的命令", par.bg.some((l: string) => /bg-1 started: npm run build/.test(l)), par.bg);
+  check("混合并行：不会产出空命令记录", !par.bg.some((l: string) => /started \(/.test(l)), par.bg);
 
   // 三条调用、结果乱序
   const anyOrder = twice(session(
@@ -477,8 +477,8 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
     ],
     [{ tc: "t3", text: S("bg-9") }, { tc: "t2", text: "文件内容" }, { tc: "t1", text: S("bg-8") }],
   ));
-  check("乱序结果：bg-8 配 build", anyOrder.bg.some((l: string) => /bg-8 启动：npm run build/.test(l)), anyOrder.bg);
-  check("乱序结果：bg-9 配 test", anyOrder.bg.some((l: string) => /bg-9 启动：npm test/.test(l)), anyOrder.bg);
+  check("乱序结果：bg-8 配 build", anyOrder.bg.some((l: string) => /bg-8 started: npm run build/.test(l)), anyOrder.bg);
+  check("乱序结果：bg-9 配 test", anyOrder.bg.some((l: string) => /bg-9 started: npm test/.test(l)), anyOrder.bg);
 
   // 没有后台任务 → 不产出记录
   const none = twice(session(
@@ -507,21 +507,21 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
   const renderWith = (es: Entry[]) => (run(es, { reason: "manual", firstKept: "u2" }).res?.compaction?.summary ?? "") as string;
 
   const readDoc = renderWith(mkOne("read", { path: "BUG.md" }, `# 缺陷报告\n\n用户看到：\n${S("bg-1")}\n\n需要排查。`));
-  check("read 的正文里提到这句时不改写", !readDoc.includes("Started background task bg-1（cmd"), readDoc.slice(0, 300));
+  check("read 的正文里提到这句时不改写", !readDoc.includes("Started background task bg-1 (cmd"), readDoc.slice(0, 300));
   check("read 的正文完整保留", readDoc.includes("缺陷报告") && readDoc.includes("需要排查"), readDoc.slice(0, 300));
 
   const grepHit = renderWith(mkOne("grep", { pattern: "x" }, `src/x.ts:42: ${S("bg-2")}`));
-  check("grep 命中这句时不当后台任务", !grepHit.includes("Started background task bg-2（cmd"), grepHit.slice(0, 300));
+  check("grep 命中这句时不当后台任务", !grepHit.includes("Started background task bg-2 (cmd"), grepHit.slice(0, 300));
 
   const noFlag = renderWith(mkOne("bash", { command: "npm run build" }, S("bg-3")));
-  check("bash 没带 background:true 时不改写", !noFlag.includes("Started background task bg-3（cmd"), noFlag.slice(0, 300));
+  check("bash 没带 background:true 时不改写", !noFlag.includes("Started background task bg-3 (cmd"), noFlag.slice(0, 300));
 
   const catFile = renderWith(mkOne("bash", { command: "cat x", background: true }, `正文内容\n${S("bg-4")}`));
-  check("bash 后台但正文是文件时不改写", !catFile.includes("Started background task bg-4（cmd"), catFile.slice(0, 300));
+  check("bash 后台但正文是文件时不改写", !catFile.includes("Started background task bg-4 (cmd"), catFile.slice(0, 300));
   check("文件正文完整保留", catFile.includes("正文内容"), catFile.slice(0, 300));
 
   const noDot = renderWith(mkOne("bash", { command: "x", background: true }, "Started background task bg-5 without the period"));
-  check("形状不完全一致时不改写", !noDot.includes("Started background task bg-5（cmd"), noDot.slice(0, 300));
+  check("形状不完全一致时不改写", !noDot.includes("Started background task bg-5 (cmd"), noDot.slice(0, 300));
 
   // 老格式摘要（命令只写在 `*` 行）：不崩，只是没有命令
   const legacyPrev = [
@@ -534,8 +534,8 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
   const legacy = run([user("u1", "q"), asst("a1", "a"), user("u2", "后续 " + "x".repeat(4000))],
     { reason: "manual", firstKept: "u2", prev: legacyPrev });
   const ls: string = legacy.res?.compaction?.summary ?? "";
-  check("老格式摘要仍能认出 bg-1", /\[background\] bg-1 启动/.test(ls), ls.slice(0, 300));
-  check("老格式没有命令时不编造", !/bg-1 启动：/.test(ls), ls.slice(0, 300));
+  check("老格式摘要仍能认出 bg-1", /\[background\] bg-1 started/.test(ls), ls.slice(0, 300));
+  check("老格式没有命令时不编造", !/bg-1 started:/.test(ls), ls.slice(0, 300));
 }
 
 console.log("\n[9i] 旧轮次的 pi-bg-bash 通知折成一行");
@@ -565,8 +565,8 @@ console.log("\n[9i] 旧轮次的 pi-bg-bash 通知折成一行");
   ];
   const { res } = run(entries, { reason: "manual", firstKept: "u2", prev });
   const s: string = res?.compaction?.summary ?? "";
-  check("连续输出批次合并计数", /\[background\] bg-3 输出批次 ×2/.test(s), s.slice(0, 500));
-  check("完成通知压成一行", /\[background\] bg-1 完成：exited \(code 0\)/.test(s), s.slice(0, 500));
+  check("连续输出批次合并计数", /\[background\] bg-3 output batch ×2/.test(s), s.slice(0, 500));
+  check("完成通知压成一行", /\[background\] bg-1 finished: exited \(code 0\)/.test(s), s.slice(0, 500));
   check("日志正文没进摘要", !s.includes("ZZZZ") && !s.includes("YYYY"), s.length);
   check("摘要显著变小", s.length < 3000, s.length);
 }

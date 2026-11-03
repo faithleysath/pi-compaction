@@ -97,6 +97,7 @@ const clipHeadTail = (s: string, head: number, tail: number) => {
 const esc = (s: string) =>
 	s
 		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 老格式 (#N)：别让模型拿它去 recall
+		.replace(/\(collapsed /g, "(\\collapsed ") // 假的折叠标记
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
 		// 假结构行：[user#12] / [assistant] / * bash#3 / →#4 一律转义，免得伪装成真条目
@@ -108,16 +109,17 @@ const esc = (s: string) =>
 /**
  * 摘要开头的一行格式说明。实测（本机 24 次）：不加时模型只有 ~60% 能分清
  * 「条目」和「正文里长得像条目的字面文本」，加上后 20/24、12/12。
- * 84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。
+ * 代价：英文版 ~390 字符 ≈ 95 token（中文版字少但 CJK 每 token 字符少，token 数相当），
+ * 比把正文全部缩进（+743 token）便宜得多。这行随历史每轮重发，改之前先算账。
  */
 const FORMAT_NOTE =
-	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取；「[background] 」是已折叠的后台任务通知，日志用 bash_output 取。";
+	'Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text; "(collapsed N tool calls #a–#b)" is a folded run of old tool calls, fetch the originals with recall range; "[background] " is a folded background-task notice, read its log with bash_output.';
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
-const TAIL_NOTE = "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。";
-const TAIL_RE = /\n*---\n可用 recall 工具按 #N 取原文[^\n]*\n?\s*$/;
+const TAIL_NOTE = "Fetch the original text of any #N with the recall tool; add image:true to get images back.";
+const TAIL_RE = /\n*---\n(?:可用 recall 工具[^\n]*|Fetch the original text[^\n]*)\n?\s*$/;
 /** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
-const FORMAT_RE = /^格式：[^\n]*\n*/;
+const FORMAT_RE = /^(?:格式：|Format:)[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
@@ -167,11 +169,11 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (lines[0] !== "[user]") return null;
 		const first = lines[1] ?? "";
 		const fin = first.match(BG_FINISH);
-		if (fin) return `[background] ${fin[1]} 完成：${fin[2]}`;
+		if (fin) return `[background] ${fin[1]} finished: ${fin[2]}`;
 		if (!first.startsWith("Background command output")) return null;
 		const idLine = lines.find((l) => /^Task \S+;/.test(l));
 		const id = idLine?.match(/^Task (\S+?);/)?.[1];
-		return id ? `[background] ${id} 输出批次` : null;
+		return id ? `[background] ${id} output batch` : null;
 	};
 
 	const lines = text.split("\n");
@@ -204,7 +206,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			for (const l of b.lines) {
 				const st = l.match(BG_START_LINE);
 				if (!st) continue;
-				const cmd = l.match(/（cmd: ([^）]*)）/)?.[1] ?? "";
+				const cmd = l.match(/[（(]cmd: ([^）)]*)[）)]/)?.[1] ?? "";
 				started.push({ id: st[1], cmd });
 			}
 		}
@@ -216,7 +218,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			// 折叠会吞掉「Started background task bg-1」，模型就不知道还有任务在跑。
 			// 补一行记录（状态是压缩那一刻的，要用 bash_tasks 查实时）。
 			for (const { id, cmd } of started) {
-				out.push(`[background] ${id} 启动${cmd ? `：${cmd}` : ""}（状态用 bash_tasks 查）`);
+				out.push(`[background] ${id} started${cmd ? `: ${cmd}` : ""} (check status with bash_tasks)`);
 			}
 		}
 		run = [];
@@ -232,10 +234,10 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (note) {
 			// 同一批里连续的同类记录合并，别一屏都是「输出批次」
 			const prev = out[out.length - 1];
-			const dup = prev?.match(/^(\[background\] \S+ 输出批次) ×(\d+)$/);
-			if (note.endsWith("输出批次") && dup && note.startsWith(dup[1])) {
+			const dup = prev?.match(/^(\[background\] \S+ output batch) ×(\d+)$/);
+			if (note.endsWith("output batch") && dup && note.startsWith(dup[1])) {
 				out[out.length - 1] = `${dup[1]} ×${Number(dup[2]) + 1}`;
-			} else if (note.endsWith("输出批次") && prev === note) {
+			} else if (note.endsWith("output batch") && prev === note) {
 				out[out.length - 1] = `${note} ×2`;
 			} else {
 				out.push(note);
@@ -380,7 +382,7 @@ const makeRender =
 						// 摘掉那段提示（190 字，折叠后毫无价值），换成这条调用自己的命令 ——
 						// 命令用 toolCallId 查，和消息位置无关，并行/乱序都不会配错。
 						const cmd = call?.cmd || undefined;
-						out.push(`→${t} Started background task ${bg[1]}${cmd ? `（cmd: ${esc(cmd)}）` : ""}（完成时自动通知，别轮询）`);
+						out.push(`→${t} Started background task ${bg[1]}${cmd ? ` (cmd: ${esc(cmd)})` : ""} (completion arrives automatically, do not poll)`);
 						continue;
 					}
 					out.push(`→${t} ${clipResult(esc(body))}`);
@@ -429,14 +431,14 @@ export default function (pi: ExtensionAPI) {
 			if (cut <= 0) {
 				// cut === 0：切点落在第一条，前面没东西可压
 				// cut === -1：切点不在投影里（理论上不会发生）
-				notify("这一轮没有可压缩的内容，已跳过", "warning");
+				notify("Nothing to compact this round, skipped", "warning");
 				return { cancel: true };
 			}
 
 			const cfg = loadConfig();
 			const body = makeRender(cfg)(proj.entries.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
-				notify("待压缩的历史渲染为空，已取消", "warning");
+				notify("History rendered empty, compaction cancelled", "warning");
 				return { cancel: true };
 			}
 
@@ -446,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 			// 折叠旧轮次的工具调用：只有最新一轮（body）保留完整细节
 			if (prev && cfg.collapseOldTools) {
 				prev = collapseToolBlocks(prev, ({ calls, lo, hi }) =>
-					`（调用工具 ${calls} 次 ${lo === hi ? `#${lo}` : `#${lo}–#${hi}`}）`,
+					`(collapsed ${calls} tool calls ${lo === hi ? `#${lo}` : `#${lo}–#${hi}`})`,
 				);
 			}
 
@@ -462,7 +464,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		} catch (err) {
 			// 任何异常都不许 fall through 到 pi 的默认摘要
-			notify(`压缩失败，已取消：${err instanceof Error ? err.message : String(err)}`, "warning");
+			notify(`Compaction failed, cancelled: ${err instanceof Error ? err.message : String(err)}`, "warning");
 			return { cancel: true };
 		}
 	});

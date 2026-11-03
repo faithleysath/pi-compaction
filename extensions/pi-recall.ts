@@ -67,7 +67,7 @@ const render = (msg: any, full: boolean): string => {
 	const cap = full ? Infinity : 800;
 	const cut = (s: string) => (s.length <= cap ? s : `${s.slice(0, cap)}…(+${s.length - cap})`);
 	if (!msg) return "";
-	if (msg.role === "excluded") return "（这条是 !! 命令，内容被排除在上下文之外，不提供）";
+	if (msg.role === "excluded") return "(this entry is a !! command; its content was excluded from context and is not available)";
 	// 别的扩展注入的通知：带上 customType，才能分清是后台任务还是别的东西
 	if (msg.role === "custom") return `[${msg.customType ?? "custom"} notice]\n${cut(text(msg.content))}`;
 	if (msg.role === "user") return `[user]\n${cut(text(msg.content))}`;
@@ -220,28 +220,28 @@ export default function (pi: ExtensionAPI) {
 					if (idx === null || !msg) return asText(`#${s.message}: no such entry`);
 					label = `#${idx}`;
 					full = render(msg, true);
-					hint = (next) => `继续：{"slice":{"message":${idx},"offset":${next}}}`;
+					hint = (next) => `next: {"slice":{"message":${idx},"offset":${next}}}`;
 				} else {
 					const idx = intOrNull(s.notice);
 					const x = idx === null ? undefined : byNotice.get(idx);
 					if (idx === null || !x) return asText(`notice#${s.notice}: no such notification`);
 					label = `notice#${idx}`;
 					full = render({ role: "custom", customType: x.customType, content: x.content }, true);
-					hint = (next) => `继续：{"slice":{"notice":${idx},"offset":${next}}}`;
+					hint = (next) => `next: {"slice":{"notice":${idx},"offset":${next}}}`;
 				}
 
 				const total = full.length;
 				if (offset > total) {
 					return asText(
-						`${label}\ntotal_chars: ${total}\noffset: ${offset}\nhas_more: false\noffset 超出总长度，最大可用 offset 是 ${total}\n\n（这条已到末尾，没有更多内容）`,
+						`${label}\ntotal_chars: ${total}\noffset: ${offset}\nhas_more: false\noffset ${offset} is past total_chars ${total} (largest usable offset is ${total})\n\n(end of this entry, nothing left to read)`,
 					);
 				}
 
 				const { start, end, chunk, hasMore } = sliceChunk(full, offset, limit);
 				const pct = total === 0 ? 100 : Math.floor((end / total) * 100);
 				const meta = [`total_chars: ${total}`, `offset: ${start}`];
-				if (start !== offset) meta.push(`（你要的 offset ${offset} 落在 emoji 中间，已对齐到码元边界 ${start}）`);
-				if (limit !== asked) meta.push(`limit: ${limit}（你要的 ${asked} 超过上限，已夹到 ${MAX_SLICE_CHARS}）`);
+				if (start !== offset) meta.push(`(offset ${offset} fell inside an emoji; snapped back to code-unit boundary ${start})`);
+				if (limit !== asked) meta.push(`limit: ${limit} (asked for ${asked}; clamped to ${MAX_SLICE_CHARS})`);
 				meta.push(
 					`returned_chars: ${chunk.length}`,
 					`next_offset: ${hasMore ? end : "null"}`,
@@ -250,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				const parts = [`${label}\n${meta.join("\n")}`, `--- CONTENT START ---\n${chunk}\n--- CONTENT END ---`];
 				if (hasMore) parts.push(hint(end));
-				else parts.push("（已到末尾，这条读完了）");
+				else parts.push("(end of this entry)");
 				return asText(parts.join("\n\n"));
 			}
 
@@ -273,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 						const take = Math.max(0, budget);
 						budget = 0;
 						chunks.push(
-							`notice#${x.n}\n${full.slice(0, take)}…(+${full.length - take}，超出单次文本上限 ${MAX_TEXT_CHARS} 字符)\n继续：{"slice":{"notice":${x.n},"offset":${take}}}`,
+							`notice#${x.n}\n${full.slice(0, take)}…(+${full.length - take}, over the ${MAX_TEXT_CHARS}-char limit)\nnext: {"slice":{"notice":${x.n},"offset":${take}}}`,
 						);
 					}
 				}
@@ -308,10 +308,10 @@ export default function (pi: ExtensionAPI) {
 					imgBudget -= take.length;
 					const more = imgs.length - take.length;
 					if (take.length === 0) {
-						emit(`${label}: 有 ${imgs.length} 张图，但已达单次上限（${MAX_IMAGES} 张 / ${MAX_IMAGE_BYTES / 1024 / 1024} MB），未带回`);
+						emit(`${label}: has ${imgs.length} images but hit the per-call cap (${MAX_IMAGES} images / ${MAX_IMAGE_BYTES / 1024 / 1024} MB); none returned`);
 						return;
 					}
-					emit(`${label}: 附图 ${take.length} 张${more > 0 ? `（另有 ${more} 张超出上限）` : ""}`);
+					emit(`${label}: attached ${take.length} images${more > 0 ? ` (${more} more over the cap)` : ""}`);
 					flush();
 					for (const b of take) content.push({ type: "image", data: b.data, mimeType: b.mimeType });
 				};
@@ -331,11 +331,11 @@ export default function (pi: ExtensionAPI) {
 						const take = Math.max(0, textBudget);
 						textBudget = 0;
 						truncated++;
-						const cont = `继续：{"slice":{"message":${n},"offset":${take}}}`;
+						const cont = `next: {"slice":{"message":${n},"offset":${take}}}`;
 						emit(
 							take > 0
-								? `${heading}\n${full.slice(0, take)}…(+${full.length - take}，超出单次文本上限)\n${cont}`
-								: `${heading}\n（省略 ${full.length} 字符：本次 expand 已达文本上限 ${MAX_TEXT_CHARS} 字符）\n${cont}`,
+								? `${heading}\n${full.slice(0, take)}…(+${full.length - take}, over the ${MAX_TEXT_CHARS}-char limit)\n${cont}`
+								: `${heading}\n(omitted ${full.length} chars: this expand already hit the ${MAX_TEXT_CHARS}-char limit)\n${cont}`,
 						);
 					}
 					attach(msg, `#${n}`);
@@ -361,9 +361,9 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 				}
-				if (wantImage && !sawImage) emit("（这些条目里没有图片）");
+				if (wantImage && !sawImage) emit("(no images in these entries)");
 				if (truncated > 0)
-					emit(`（${truncated} 条因超出单次文本上限 ${MAX_TEXT_CHARS} 字符而被截断；上面每条都给了继续读的 slice 参数）`);
+					emit(`(${truncated} entries were truncated at the ${MAX_TEXT_CHARS}-char limit; each one above prints the exact slice call to continue)`);
 				flush();
 				return { content, details: undefined };
 			}
