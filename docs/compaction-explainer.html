@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>469 行 pi 压缩扩展 · 动画解读</title>
+<title>pi 压缩扩展 · 动画解读</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#11161f; --panel2:#0e131b; --line:#1e2633;
@@ -200,7 +200,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>469 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
+    <h1><span id="lineCount">463</span> 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
     <div class="nav">
       <div class="dots" id="dots"></div>
       <button id="prev">←</button>
@@ -351,6 +351,7 @@ const clipHeadTail = (s: string, head: number, tail: number) => {
 const esc = (s: string) =>
 	s
 		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 内容里的 (#N)：别让模型拿它当真的编号去 recall
+		.replace(/\(collapsed /g, "(\\collapsed ") // 假的折叠标记
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
 		// 假结构行：[user#12] / [assistant] / * bash#3 / →#4 一律转义，免得伪装成真条目
@@ -362,15 +363,16 @@ const esc = (s: string) =>
 /**
  * 摘要开头的一行格式说明。实测（本机 24 次）：不加时模型只有 ~60% 能分清
  * 「条目」和「正文里长得像条目的字面文本」，加上后 20/24、12/12。
- * 84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。
+ * 代价：英文版 ~390 字符 ≈ 95 token（中文版字少但 CJK 每 token 字符少，token 数相当），
+ * 比把正文全部缩进（+743 token）便宜得多。这行随历史每轮重发，改之前先算账。
  */
 const FORMAT_NOTE =
-	"Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text; "(collapsed N tool calls #a–#b)" is a folded run of old tool calls, fetch the originals with recall range; "[background] " is a folded background-task notice, read its log with bash_output.";
+	'Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text; "(collapsed N tool calls #a–#b)" is a folded run of old tool calls, fetch the originals with recall range; "[background] " is a folded background-task notice, read its log with bash_output.';
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "Fetch the original text of any #N with the recall tool; add image:true to get images back.";
 const TAIL_RE = /\n*---\nFetch the original text[^\n]*\n?\s*$/;
-/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
+/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会剥不掉 */
 const FORMAT_RE = /^Format:[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
@@ -399,7 +401,7 @@ const buildRefs = (entries: any[]) => {
  *
  * 上一轮的摘要原样前置进来，里面每条工具调用和结果都是两三行文本 —— 轮次一多，
  * 摘要就被这些历史细节撑爆。这里把**连续的工具调用块**合并成一行
- * 「(collapsed N tool calls #a–#b)」，用户消息和助手正文一字不动。
+ * 「（调用工具 N 次 #a–#b）」，用户消息和助手正文一字不动。
  *
  * 只处理 `* name#N ...` 和 `→#N ...` 开头的块。正文里长得像条目的行早被 esc()
  * 加了反斜杠，不会误伤（`\* ` 不匹配 `^\* `）。
@@ -458,7 +460,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			for (const l of b.lines) {
 				const st = l.match(BG_START_LINE);
 				if (!st) continue;
-				const cmd = l.match(/（cmd: ([^）]*)）/)?.[1] ?? "";
+				const cmd = l.match(/\(cmd: ([^)]*)\)/)?.[1] ?? "";
 				started.push({ id: st[1], cmd });
 			}
 		}
@@ -470,7 +472,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			// 折叠会吞掉「Started background task bg-1」，模型就不知道还有任务在跑。
 			// 补一行记录（状态是压缩那一刻的，要用 bash_tasks 查实时）。
 			for (const { id, cmd } of started) {
-				out.push(`[background] ${id} started${cmd ? `：${cmd}` : ""}（状态用 bash_tasks 查）`);
+				out.push(`[background] ${id} started${cmd ? `: ${cmd}` : ""} (check status with bash_tasks)`);
 			}
 		}
 		run = [];
@@ -486,10 +488,10 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (note) {
 			// 同一批里连续的同类记录合并，别一屏都是「输出批次」
 			const prev = out[out.length - 1];
-			const dup = prev?.match(/^(\[background\] \S+ 输出批次) ×(\d+)$/);
-			if (note.endsWith("输出批次") && dup && note.startsWith(dup[1])) {
+			const dup = prev?.match(/^(\[background\] \S+ output batch) ×(\d+)$/);
+			if (note.endsWith("output batch") && dup && note.startsWith(dup[1])) {
 				out[out.length - 1] = `${dup[1]} ×${Number(dup[2]) + 1}`;
-			} else if (note.endsWith("输出批次") && prev === note) {
+			} else if (note.endsWith("output batch") && prev === note) {
 				out[out.length - 1] = `${note} ×2`;
 			} else {
 				out.push(note);
@@ -683,14 +685,14 @@ export default function (pi: ExtensionAPI) {
 			if (cut <= 0) {
 				// cut === 0：切点落在第一条，前面没东西可压
 				// cut === -1：切点不在投影里（理论上不会发生）
-				notify("这一轮没有可压缩的内容，已跳过", "warning");
+				notify("Nothing to compact this round, skipped", "warning");
 				return { cancel: true };
 			}
 
 			const cfg = loadConfig();
 			const body = makeRender(cfg)(proj.entries.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
-				notify("待压缩的历史渲染为空，已取消", "warning");
+				notify("History rendered empty, compaction cancelled", "warning");
 				return { cancel: true };
 			}
 
@@ -716,7 +718,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		} catch (err) {
 			// 任何异常都不许 fall through 到 pi 的默认摘要
-			notify(`压缩失败，已取消：${err instanceof Error ? err.message : String(err)}`, "warning");
+			notify(`Compaction failed, cancelled: ${err instanceof Error ? err.message : String(err)}`, "warning");
 			return { cancel: true };
 		}
 	});
@@ -848,7 +850,7 @@ for (let v = 0; v < snappedCut; v++) {
     if (e.tool) RENDERED.push({ grp:2, html:`<span class="c">*</span> ${esc(e.tool.name)}${k} ${clipH(esc(escBody(e.tool.args)), CFG_TOOL_ARGS)}` });
   } else if (e.role === "toolResult") {
     if (e.bg) {
-      RENDERED.push({ grp:2, bg:e.bg, html:`<span class="r">→</span>${k} Started background task ${e.bg.id}（cmd: ${esc(e.bg.cmd)}） (completion arrives automatically, do not poll)` });
+      RENDERED.push({ grp:2, bg:e.bg, html:`<span class="r">→</span>${k} Started background task ${e.bg.id} (cmd: ${esc(e.bg.cmd)}) (completion arrives automatically, do not poll)` });
     } else {
       RENDERED.push({ grp:2, html:`<span class="r">→</span>${k} ${clipHT(esc(escBody(e.text)), CFG_RES_HEAD, CFG_RES_TAIL)}` });
     }
@@ -875,11 +877,11 @@ const RENDERED_FOLDED = (() => {
     }
     if (!calls) { for (const h of run) out.push({ grp: 2, html: h }); run = null; return; }
     const lo = Math.min(...nums), hi = Math.max(...nums);
-    out.push({ grp: 2, html: `<span class="foldmark">（collapsed ${calls} tool calls ${lo === hi ? "#" + lo : "#" + lo + "–#" + hi}）</span>` });
+    out.push({ grp: 2, html: `<span class="foldmark">(collapsed ${calls} tool calls ${lo === hi ? "#" + lo : "#" + lo + "–#" + hi})</span>` });
     // 被折掉的工具结果里有后台任务启动 → 补一行记录，否则模型不知道还有任务在跑
     for (const h of run) {
-      const m = h.match(/Started background task (\S+?)（cmd: (.*?)）/);
-      if (m) out.push({ grp: 2, html: `<span class="foldbg">[background]</span> ${m[1]} 启动：${m[2]}（状态用 bash_tasks 查）` });
+      const m = h.match(/Started background task (\S+?) \(cmd: (.*?)\)/);
+      if (m) out.push({ grp: 2, html: `<span class="foldbg">[background]</span> ${m[1]} started: ${m[2]} (check status with bash_tasks)` });
     }
     run = null;
   };
@@ -982,7 +984,7 @@ const STEPS = [
   {
     title:"后台任务：命令用 toolCallId 绑，启动结果要三重校验",
     bullets:[
-      "<code>bash</code> 带 <code>background: true</code> 时，结果整段就是一句 <code>Started background task bg-7. …</code> —— 后面还有 190 字符「别轮询」的提示，折叠后毫无价值。这里改写成一行，顺手把命令绑上去：<code>→#N Started background task bg-7（cmd: bun test） (completion arrives automatically, do not poll)</code>。",
+      "<code>bash</code> 带 <code>background: true</code> 时，结果整段就是一句 <code>Started background task bg-7. …</code> —— 后面还有 190 字符「别轮询」的提示，折叠后毫无价值。这里改写成一行，顺手把命令绑上去：<code>→#N Started background task bg-7 (cmd: bun test) (completion arrives automatically, do not poll)</code>。",
       "<b>命令必须用 <code>toolCallId</code> 查，不能按位置配</b>。并行调用里 <code>read</code> 没有 <code>command</code>，但它的结果照样占一个位置；结果顺序也不保证和调用顺序一致。位置配对会把 <code>npm run build</code> 安到 <code>npm test</code> 头上。",
       "<b>识别要过三重校验</b>，缺一不可：① 工具是 <code>bash</code> ② 那次调用确实带 <code>background: true</code> ③ 结果<b>整段</b>就是那句话（<code>^</code> 锚点 + 必须带句点）。只匹配子串的话，<code>read</code> 读一份讲这个 bug 的文档、<code>grep</code> 命中日志，整份文件内容都会被替换成一行记录。",
       "别的扩展注入的通知（<code>custom_message</code>）走另一套：<b>头部 " + CFG_CUSTOM_HEAD + " 行原样保留</b>（任务 ID / 状态 / 命令 / <code>seq_through</code> 都在头几行），正文按工具结果那套头+尾截断。实测 3 条 <code>pi-bg-bash</code> 通知 9,457 → 1,227 字符（<b>-87%</b>）；<code>bash_watch</code> 的 32 KiB 批次同理。"
@@ -994,7 +996,7 @@ const STEPS = [
     title:"拼起来，开头加一行格式说明",
     bullets:[
       "<b><code>FORMAT_NOTE</code> 是实测逼出来的</b>：不加时模型只有 ~62% 能分清「真条目」和「正文里长得像条目的字面文本」（24 次测试只对 15 次）。加上后 20/24、12/12。",
-      "它只说一件事：行首无反斜杠的 <code>[user#N]</code> / <code>→#N</code> 才是条目，其余都是上一条的正文。84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。",
+      "它只说一件事：行首无反斜杠的 <code>[user#N]</code> / <code>→#N</code> 才是条目，其余都是上一条的正文。现在这行英文约 390 字符 ≈ 95 token，比把正文全部缩进（+743 token）便宜得多；但它随历史每轮重发，改之前先算账。",
       "<code>previousSummary</code> 有值就前置拼接，但会先用 <code>FORMAT_RE</code> 剥掉它自己的格式说明和尾注 —— 不然每轮累加一份。",
       "<b>绝不 return undefined</b>：undefined 在 pi 里等于「我不接管，你走默认 LLM 摘要」。每条出口要么 <code>{compaction}</code>，要么 <code>{cancel:true}</code>。",
       "<code>cut &lt;= 0</code>（pi 的切点在第 1 条、或者根本不在可见条目里）：<code>notify</code> 一句然后 <code>cancel</code>，什么都不做。宁可让 pi 报「Nothing to compact」，也不替它编一个切点。"
@@ -1020,7 +1022,7 @@ const STEPS = [
       "<b>用户消息和助手正文一字不动</b>，只有工具细节被折叠。折叠行带编号范围，模型可以 <code>recall range:[2,8]</code> 把原文取回来。",
       "<b>只有最新一轮保留完整细节</b>：本次刚渲染好的 <code>body</code> 不折叠，折的是 <code>previousSummary</code>。",
       "对比：6 轮压缩后摘要 11,616 → 3,744 字符（<b>-68%</b>）；一直聊到摘要吃满 1M 窗口，压缩次数从 180 次变 764 次。开关是 <code>collapseOldTools</code>，默认开。",
-      "<b>折叠不能吞掉后台任务</b>：<code>Started background task bg-1</code> 就在被折掉的工具结果里，抹掉它模型就不知道还有任务在跑。所以折叠后补一行 <code>[background] bg-1 启动：npm run build（状态用 bash_tasks 查）</code>。",
+      "<b>折叠不能吞掉后台任务</b>：<code>Started background task bg-1</code> 就在被折掉的工具结果里，抹掉它模型就不知道还有任务在跑。所以折叠后补一行 <code>[background] bg-1 started: npm run build (check status with bash_tasks)</code>。",
       "<code>pi-bg-bash</code> 的通知（<code>custom_message</code>）走另一条路：旧轮次的压成一行 <code>[background] bg-3 output batch ×N</code>，日志用 <code>bash_output</code> 取；当前轮次的保留头部（id / 状态 / 命令）+ 头尾截断。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v >= snappedCut ? "kept" : "ghost"; },
@@ -1040,10 +1042,10 @@ const STEPS = [
   {
     title:"正文会伪装成条目 —— 转义",
     bullets:[
-      "用户/助手/工具结果里都是<b>任意文本</b>：README、日志、粘贴的代码。它们自己也能写出 <code>[user#9]</code>、<code>* bash#10</code>、<code>→#11</code>、<code>…(+500)</code>、甚至 <code>&lt;/summary&gt;</code>。",
+      "用户/助手/工具结果里都是<b>任意文本</b>：README、日志、粘贴的代码。它们自己也能写出 <code>[user#9]</code>、<code>* bash#10</code>、<code>→#11</code>、<code>…(+500)</code>、<code>(collapsed 3 tool calls #2–#8)</code>、甚至 <code>&lt;/summary&gt;</code>。",
       "<code>[user#9]</code> 开头不转义 → 工具结果里的一行会被读成<b>用户新说的一句话</b>。这是最危险的一个：读个 README 就能把指令注进摘要。",
       "<code>&lt;/summary&gt;</code> 不转义 → 提前闭合 pi 的外层包裹，后面的内容跑到 summary 外面去。",
-      "<code>…(+N)</code> 不转义 → 模型以为这段被截断了，实际上一个字没少，白白去 recall 一次。",
+      "<code>…(+N)</code> 不转义 → 模型以为这段被截断了，实际上一个字没少，白白去 recall 一次。<code>(collapsed N tool calls …)</code> 同理，会被当成真的折叠行。",
       "内容里出现的 <code>(#14)</code> 也一并转义，免得模型拿它去 recall 到<b>别的</b>消息上。",
       "<code>esc()</code> 只在行首真撞上时加一个 <code>\</code>。本机这份 21k token 的摘要实测只多 <b>7 个字符</b>。"
     ],
@@ -1126,7 +1128,7 @@ function miniHTML(e){
     return h;
   }
   if (e.role === "toolResult") {
-    if (e.bg) return `<span class="r">→</span>${k} Started background task ${e.bg.id}（cmd: ${esc(e.bg.cmd)}） (completion arrives automatically, do not poll)`;
+    if (e.bg) return `<span class="r">→</span>${k} Started background task ${e.bg.id} (cmd: ${esc(e.bg.cmd)}) (completion arrives automatically, do not poll)`;
     return `<span class="r">→</span>${k} ${clipMini(escBody(e.text), 62)}`;
   }
   if (e.role === "custom") {
@@ -1171,6 +1173,8 @@ sumBody.append(tailNote);
 
 /* 代码面板 */
 const SRC = document.getElementById("src").textContent.replace(/^\n/, "").replace(/\n$/, "").split("\n");
+document.getElementById("lineCount").textContent = SRC.length;
+document.title = `${SRC.length} 行 pi 压缩扩展 · 动画解读`;
 const codeEl = document.getElementById("code");
 SRC.forEach((line, i) => {
   const s = document.createElement("span");
@@ -1228,8 +1232,8 @@ const ANCHORS = [
   // 3 切点来自 pi（未过滤的投影条目里找）
   [{from:'const cut = proj.entries.findIndex', to:'const cut = proj.entries.findIndex'},
    '// 切点直接用 pi 算好的那个'],
-  // 4 cut <= 0 兜底
-  [{from:'if (cut <= 0) {', to:'return { cancel: true };'}],
+  // 4 切点原样透传（落在 toolResult 上的情况 pi 自己避开了）
+  ['firstKeptEntryId: event.preparation.firstKeptEntryId,'],
   // 5 全局编号
   [{from:'const buildRefs = (entries: any[]) => {', to:'return m;'}, 'buildRefs(ctx.sessionManager.getEntries())'],
   // 6 正文照抄 + bashExecution + 退出状态
@@ -1252,18 +1256,18 @@ const ANCHORS = [
    'if (role === "custom") {', 'lines.length <= CUSTOM_HEAD_LINES + 2'],
   // 10 拼起来 + 格式说明
   ['const FORMAT_NOTE =', 'const TAIL_NOTE =', {from:'const summary = `${FORMAT_NOTE}', to:'};'}],
-  // 10 重建上下文
+  // 11 重建上下文
   [],
-  // 11 折叠
+  // 12 折叠
   ['const collapseToolBlocks = (text: string',
    'const NEW_BLOCK = /^(',
-   {from:'\t\tif (calls === 0) {', to:'\t\t\trun = [];'},
-   {from:'\t\tif (b.tool) {', to:'\t\t\tout.push(b.lines.join("\\n").replace(/\\n+$/, ""));'},
+   {from:'\t\tif (calls === 0) {', to:'\t\trun = [];'},
+   {from:'\t\tif (b.tool) {', to:'\t\tout.push(b.lines.join("\\n").replace(/\\n+$/, ""));'},
    {from:'// 折叠旧轮次的工具调用', to:'#${lo}–#${hi}'},
    'collapseOldTools: true'],
-  // 12 回查
-  [{from:'const buildRefs = (entries: any[]) => {', to:'return m;'}],
-  // 13 转义
+  // 13 回查
+  ['const TAIL_NOTE'],
+  // 14 转义
   [{from:'const esc = (s: string) =>', to:'.replace(/^(\\[user',}, 'const esc'],
 ];
 

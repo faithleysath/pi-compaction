@@ -6,6 +6,14 @@
     "pi-package"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faithleysath/pi-compaction.git"
+  },
+  "homepage": "https://github.com/faithleysath/pi-compaction",
+  "bugs": {
+    "url": "https://github.com/faithleysath/pi-compaction/issues"
+  },
   "pi": {
     "extensions": [
       "./extensions/pi-compaction.ts",

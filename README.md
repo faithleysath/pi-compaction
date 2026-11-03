@@ -32,7 +32,7 @@ pi install git:github.com/faithleysath/pi-compaction
 ## 摘要长什么样
 
 ```
-Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text.
+Format: a line starting with [user#N] / [assistant#N] / * tool#N / →#N is one entry (no leading backslash); every other line is the body of the entry above it; a leading backslash marks literal text; "(collapsed N tool calls #a–#b)" is a folded run of old tool calls, fetch the originals with recall range; "[background] " is a folded background-task notice, read its log with bash_output.
 
 [user#1]
 修一下 auth：reset 之后 refresh token 没更新
@@ -129,13 +129,13 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 ```
 (collapsed 3 tool calls #12–#17)
 
-[background] bg-1 启动：npm run build（状态用 bash_tasks 查）
+[background] bg-1 started: npm run build (check status with bash_tasks)
 ```
 
 命令是在**渲染阶段用 `toolCallId` 绑上去的**，不靠「调用行 / 结果行」的位置配对：
 
 ```
-→#3 Started background task bg-1（cmd: npm run build）（完成时自动通知，别轮询）
+→#3 Started background task bg-1 (cmd: npm run build) (completion arrives automatically, do not poll)
 ```
 
 折叠后变成：
@@ -143,8 +143,8 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 ```
 (collapsed 4 tool calls #2–#5)
 
-[background] bg-1 启动：npm run build（状态用 bash_tasks 查）
-[background] bg-2 启动：npm test（状态用 bash_tasks 查）
+[background] bg-1 started: npm run build (check status with bash_tasks)
+[background] bg-2 started: npm test (check status with bash_tasks)
 ```
 
 为什么不能按位置配：并行调用里 `read` 没有 `command`，但它的结果照样占一个位置；
@@ -232,7 +232,7 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 - `image: true`：把原文里的图片块真带回来（不只是 `[image png]` 占位符），
   上限 6 张 / 6 MB
 - `range`：区间，5 条一页
-- `query`：全会话关键词检索，BM25 风格打分
+- `query`：全会话关键词检索，按词频打分（每个命中词 `1 + log(次数)`），5 条一页
 - `slice`：单条的精确分块读取（`offset` / `limit` 都算字符）。`expand` 和 `notices`
   被 60k 上限截断时，会直接给出这一条该用的 `slice` 调用（含**它自己**的编号和已给到的
   offset）；照着返回头里的 `next_offset` 一路跟到 `has_more: false`，拼起来就是完整原文。
@@ -263,7 +263,8 @@ yaml frontmatter、`git diff` 里也有 `---`，一旦命中，一条工具结�
 后半截丢掉 `→#N` 前缀变成无主语文本。转义成 `\---` 后整条正常折进去。
 
 **开头要有格式说明。** 实测发现模型分不清「条目」和「正文里长得像条目的字面文本」，
-24 次测试只对 15 次；加上那行说明后 20/24、12/12。84 字符换可靠性，划算。
+24 次测试只对 15 次；加上那行说明后 20/24、12/12。英文版约 390 字符 ≈ 95 token，
+比把正文全部缩进（+743 token）便宜，但这行每轮都要重发，改之前先算账。
 
 **图片只留占位符。** base64 永远不进摘要（本机 328 张图 = 295 MB）。要真图就 `recall` + `image: true`。
 
@@ -276,7 +277,8 @@ yaml frontmatter、`git diff` 里也有 `---`，一旦命中，一条工具结�
 - **`recall` 只认 `type === "message"` 条目**。摘要本体（`type === "compaction"`）、
   `custom_message`、`branch_summary` 都不占号也查不到。摘要内容已经在上下文里，
   查它本来也没意义。
-- **编号会跳号**。`!!` 命令和 `custom_message` 占号但不渲染（前者压根不进上下文）。
+- **编号会跳号**。`!!` 命令（`excludeFromContext`）占号但不渲染。`custom_message`（后台任务
+  通知等）不是 `message` 类型，不占号，只能靠 `notice#N` 查。
 - **不保证无限压缩**。摘要每轮把上一轮的整段文本前置进来，所以第 N 轮的摘要 = 前 N−1 轮
   全部内容 + 本轮新折叠的。压缩后的上下文恒定是「1 条 system + 1 条摘要 + 约 keepRecentTokens
   的原始消息」，涨的只有摘要那一条。实测每轮约 +770 字节（消息很短时），真实会话里约 6–10 KB/轮。
@@ -289,16 +291,27 @@ yaml frontmatter、`git diff` 里也有 `---`，一旦命中，一条工具结�
   超了会截断，并给出该条专用的 `slice` 参数，继续读用 `slice`（单次最多 50k 字符），
   不是「用更小的 expand 再试」—— 单条超过 60k 时后者根本读不完。
 
+## 仓库结构
+
+```
+extensions/pi-compaction.ts    压缩 hook：切点、渲染、折叠
+extensions/pi-recall.ts        recall 工具：expand / range / query / slice
+tests/compaction.test.ts      压缩产物测试（90 项）
+tests/recall.test.ts          召回测试（61 项）
+tests/e2e/                    真模型 E2E，默认不跑
+docs/compaction-explainer.html  单文件动画解说（14 步）
+```
+
 ## 测试
 
 ```bash
 bun install
-bun run test        # 61 + 13 项，直接调真实 handler，不经过 pi 进程
+bun run test        # 90 + 61 项，直接调真实 handler，不经过 pi 进程
 bun run typecheck
 bun run test:e2e    # 可选：真模型、真 pi 进程，花钱，见 tests/e2e/README.md
 ```
 
-`bun test` 测机制（压缩产物、编号、转义、分块拼接）；行为（模型会不会在该召回的时候召回）
+两个测试文件测机制（压缩产物、编号、转义、分块拼接）；行为（模型会不会在该召回的时候召回）
 只能拿真模型跑，所以单独放在 `tests/e2e/`，默认不进 `bun test`。
 
 已跑过的一轮结论：曾提议给摘要加 7 条「历史使用规则」，在「摘要缺细节是否主动召回」和
