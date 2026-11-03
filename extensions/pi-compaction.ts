@@ -3,6 +3,8 @@
  *
  * 触发时机和切点都交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
  *   切点 = event.preparation.firstKeptEntryId（pi 按 compaction.keepRecentTokens 算好的，默认 20000 tok）
+ *   渲染源 = buildSessionProjection()，和 pi 自己喂给 LLM 的是同一份投影：
+ *           被 context_edit 省略/替换过的内容按投影后的样子渲染，不会把 pi 刻意丢掉的东西复活
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
  *   工具参数的截断长度、工具结果的头/尾长度各自可配（~/.pi/agent/pi-compaction.json）
  *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
@@ -13,7 +15,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { buildSessionProjection, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
  * 三个截断长度，单位都是字符（不是 token）。
@@ -138,33 +140,6 @@ const buildRefs = (entries: any[]) => {
 	return m;
 };
 
-const isVisible = (e: any) =>
-	(e.type === "message" && e.message && e.message.role !== "system") ||
-	e.type === "custom_message" ||
-	e.type === "branch_summary";
-
-/**
- * 取出「还没被折叠」的那段条目。
- *
- * event.branchEntries 是整个分支（根 → 叶），上一轮被压掉的消息也在里面 ——
- * 它们已经变成 previousSummary 的一段文本了。如果从头渲染，第 2 轮就会把
- * 同一批内容再渲染一遍（实测摘要膨胀 3.4 倍，第 3 轮更糟）。
- *
- * 所以找到最后一个 compaction 条目，从它的 firstKeptEntryId 开始算。
- * 找不到那个 id（比如上轮用了 compact-all 的空串哨兵）就从 compaction 之后开始。
- */
-const liveFromLastCompaction = (branch: any[]) => {
-	let start = 0;
-	for (let i = branch.length - 1; i >= 0; i--) {
-		if (branch[i].type !== "compaction") continue;
-		const keepId = branch[i].firstKeptEntryId;
-		const ki = keepId ? branch.findIndex((e: any) => e.id === keepId) : -1;
-		start = ki >= 0 ? ki : i + 1;
-		break;
-	}
-	return branch.slice(start).filter(isVisible);
-};
-
 /**
  * 多轮压缩时折叠旧轮次的工具调用。
  *
@@ -225,33 +200,67 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 };
 
+/** `!cmd` 的执行状态尾巴。pi 自己的 bashExecutionToText 就是这么写的，别丢 */
+const bashStatus = (m: any) => {
+	const parts: string[] = [];
+	if (m.cancelled) parts.push("(command cancelled)");
+	else if (m.exitCode !== null && m.exitCode !== undefined && m.exitCode !== 0) parts.push(`Command exited with code ${m.exitCode}`);
+	if (m.truncated && m.fullOutputPath) parts.push(`[Output truncated. Full output: ${m.fullOutputPath}]`);
+	return parts.length ? `\n\n${parts.join("\n")}` : "";
+};
+
+/**
+ * 把「投影后的条目」渲染成摘要正文。
+ *
+ * 输入是 buildSessionProjection().entries —— 每个条目带着它**实际进上下文的 messages**：
+ *   - 被 context_edit 省略（replacement: null）的条目，messages 是空的 → 自然跳过
+ *   - 被 context_edit 替换的条目，messages 里是替换后的内容 → 渲染的就是替换后的样子
+ *   - 上一轮的 compaction 条目，messages 是 [system, compactionSummary] → 跳过（走 previousSummary）
+ *
+ * 编号仍然按 raw entries 里的 `type === "message"` 数，和 recall 完全一致。
+ */
 const makeRender =
 	(cfg: ClipConfig) =>
-	(entries: any[], ref: Map<string, number>): string => {
+	(entries: { sourceEntry: any; messages: any[] }[], ref: Map<string, number>): string => {
 		const clipResult = (s: string) => clipHeadTail(s, cfg.toolResultHead, cfg.toolResultTail);
 		const out: string[] = [];
-		for (const e of entries) {
-			const r = ref.get(e.id);
+
+		for (const { sourceEntry: src, messages } of entries) {
+			if (src.type === "compaction") continue; // 上轮摘要，由 previousSummary 负责
+			const r = ref.get(src.id);
 			const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
-			if (e.type === "branch_summary") {
-				// pi 会把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
-				if (!e.summary) continue;
-				out.push(`[user${t}]\n${esc(e.summary)}`);
-				continue;
-			}
-			const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
-			if (!msg) continue;
-			if (msg.role === "bashExecution") {
-				// 用户敲的 ! 命令：命令原文，输出头+尾截断
-				// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
-				if (msg.excludeFromContext) continue;
-				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipResult(esc(msg.output ?? ""))}`);
-				continue;
-			}
-			for (const m of convertToLlm([msg])) {
-				if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
-				else if (m.role === "toolResult") out.push(`→${t} ${clipResult(esc(text(m.content)))}`);
-				else if (m.role === "assistant" && Array.isArray(m.content)) {
+
+			for (const m of messages) {
+				const role = m.role;
+
+				if (role === "system" || role === "compactionSummary") continue;
+
+				if (role === "branchSummary") {
+					// pi 把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
+					if (!m.summary) continue;
+					out.push(`[user${t}]\n${esc(m.summary)}`);
+					continue;
+				}
+
+				if (role === "custom") {
+					// 别的扩展注进去的通知：没有编号（它不是 type === "message" 条目）
+					out.push(`[user]\n${esc(text(m.content))}`);
+					continue;
+				}
+
+				if (role === "bashExecution") {
+					// 用户敲的 ! 命令：命令原文，输出头+尾截断，末尾补退出状态
+					// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
+					if (m.excludeFromContext) continue;
+					out.push(`[user${t}] $ ${esc(m.command)}\n${clipResult(esc(m.output ?? ""))}${bashStatus(m)}`);
+					continue;
+				}
+
+				if (role === "user") {
+					out.push(`[user${t}]\n${esc(text(m.content))}`);
+				} else if (role === "toolResult") {
+					out.push(`→${t} ${clipResult(esc(text(m.content)))}`);
+				} else if (role === "assistant" && Array.isArray(m.content)) {
 					// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
 					let buf: string[] = [];
 					const flush = () => {
@@ -285,24 +294,23 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		try {
-			// event.branchEntries 是「从根到叶子」的全部条目，里面还躺着上一轮已经折进
-			// previousSummary 的那批消息。不跳过它们就会重复渲染：第 2 轮摘要 = 上轮摘要
-			// + 全部历史渲染，越压越大。所以从最后一个 compaction 的 firstKeptEntryId 起算。
-			const live = liveFromLastCompaction(event.branchEntries);
+			// 渲染源用 pi 自己的投影：buildSessionProjection 会应用 context_edit、
+			// 只保留最新 compaction 之后的条目。这样我们看到的和模型看到的是同一份历史 ——
+			// 被省略的失败尝试不会复活，被替换过的内容按替换后的样子进摘要。
+			const proj = buildSessionProjection(event.branchEntries);
 
-			// 切点直接用 pi 算好的那个：它按 compaction.keepRecentTokens（默认 20000 tok）
-			// 从末尾往回累加，并且保证落在合法边界上（不会把 toolCall 和 toolResult 拆开）。
-			// 我们不重复实现这套逻辑，只负责把切点之前的内容渲染成文本。
-			const cut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);
+			// 切点直接用 pi 算好的那个。注意要在**未过滤**的投影条目里找：
+			// pi 的切点可以落在 context_edit 之类的空条目上，先过滤就永远找不到。
+			const cut = proj.entries.findIndex((e: any) => e.sourceEntry.id === event.preparation.firstKeptEntryId);
 			if (cut <= 0) {
-				// cut === 0：pi 说一条都不用压（本来也不会调到这里）
-				// cut === -1：切点不在可见条目里，说明这一轮没得压
+				// cut === 0：切点落在第一条，前面没东西可压
+				// cut === -1：切点不在投影里（理论上不会发生）
 				notify("这一轮没有可压缩的内容，已跳过", "warning");
 				return { cancel: true };
 			}
 
 			const cfg = loadConfig();
-			const body = makeRender(cfg)(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
+			const body = makeRender(cfg)(proj.entries.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
 				notify("待压缩的历史渲染为空，已取消", "warning");
 				return { cancel: true };

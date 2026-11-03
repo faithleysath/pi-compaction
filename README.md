@@ -188,8 +188,12 @@ M src/auth/session.ts
 装了插件就不该再出现 LLM 摘要，所以每条出口要么 `{ compaction }`，要么 `{ cancel: true }`。
 handler 抛错也会被 pi 当成弃权，所以外层有 `try/catch` 兜底。
 
-**切点自己算，不信任 pi 的。** pi 的切点是按 token（`keepRecentTokens`，默认 20k）算的，
-这里是按条数。切点不能落在 `toolResult` 上，否则 toolCall 和结果会被拆开——`while` 循环专门处理这个。
+**切点原样用 pi 的，但渲染走 pi 的投影。** `buildSessionProjection()` 是 pi 自己喂给 LLM 的那份
+上下文：它应用了 `context_edit`（溢出恢复时抹掉失败的尝试、扩展主动替换内容），也只保留最新
+compaction 之后的条目。我们按同一份投影渲染，所以不会把 pi 刻意丢掉的内容复活。
+
+切点也在**未过滤**的投影条目里找——pi 的切点可以落在 `context_edit` 这种空条目上，
+先按「有没有消息」过滤再找就永远找不到，会误判成「没得压」然后 cancel。
 
 **正文要转义。** 工具结果里可能是任意文本（README、日志），它自己也能写出
 `[user#1]`、`* bash#2`、`→#3`、`</summary>`。不转义就能伪装成条目。加一个反斜杠即可，
@@ -222,6 +226,16 @@ yaml frontmatter、`git diff` 里也有 `---`，一旦命中，一条工具结�
   压缩 hook 根本不会被调用 —— 这时只能 `/new`。本机 1M 窗口、工具输出 3000 字/条的实测：
   35 次压缩之后进入这个状态（用旧的「保留 20 条」策略是 19 次）。
 - **monorepo 子目录不支持**。pi 的 git 源只能指向仓库根目录。
+- **`recall` 有资源上限**：单次最多 6 张图 / 6 MB，文本 60k 字符。超了会截断并提示，
+  用更小的 `expand` 分批取。
+
+## 测试
+
+```bash
+bun install
+bun run test        # 61 + 13 项，直接调真实 handler，不经过 pi 进程
+bun run typecheck
+```
 
 ## 逐行动画解读
 

@@ -9,7 +9,7 @@
  * expand 可以一次给多个编号（批量召回）；image: true 时把原文里的图片块也一起带回来。
  */
 
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PAGE = 5;
@@ -18,6 +18,11 @@ const PAGE = 5;
 const MAX_IMAGES = 6;
 /** 单次照片总字节上限（base64 后），超了就停，避免一次 recall 把请求体顶到几十 MB */
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+/**
+ * 单次 expand 的文本上限（字符）。本机最大的单条 toolResult 是 129,036 字符 ≈ 32k tok，
+ * 不限量的话 expand:[1..100] 能把 1M 窗口一次吃掉。默认 60k 字符 ≈ 15k tok。
+ */
+const MAX_TEXT_CHARS = 60_000;
 
 /** 抽一条消息里的图片块 */
 const imagesOf = (msg: any): { data: string; mimeType: string }[] => {
@@ -39,7 +44,13 @@ const text = (c: unknown): string =>
 					.join("\n")
 			: "";
 
-/** 一条消息 → 纯文本（assistant 带 toolCall 名与参数，toolResult 带全文） */
+/**
+ * 一条消息 → 纯文本（assistant 带 toolCall 名与参数，toolResult 带全文）。
+ *
+ * `full: true` 不截断，`full: false` 截到 800 字符 —— 后者只用于预览。
+ * **搜索必须用 full: true**：本机 99% 的超长消息在 800 字符之后还有实质内容，
+ * 拿预览文本去搜等于只看前 800 字。
+ */
 const render = (msg: any, full: boolean): string => {
 	const cap = full ? Infinity : 800;
 	const cut = (s: string) => (s.length <= cap ? s : `${s.slice(0, cap)}…(+${s.length - cap})`);
@@ -140,9 +151,23 @@ export default function (pi: ExtensionAPI) {
 				};
 
 				const done = new Set<number>(); // 同一个编号只输出一次（批量里点了 #2 又点了 #3 时别重复）
+				let textBudget = MAX_TEXT_CHARS; // 整个 expand 共享一个文本预算
+				let truncated = 0; // 有多少条因为预算没给全
 				const show = (n: number, msg: any, heading: string) => {
 					done.add(n);
-					emit(`${heading}\n${render(msg, true)}`);
+					const full = render(msg, true);
+					if (full.length <= textBudget) {
+						textBudget -= full.length;
+						emit(`${heading}\n${full}`);
+					} else if (textBudget > 0) {
+						// 还能给一部分：截到预算为止
+						emit(`${heading}\n${full.slice(0, textBudget)}…(+${full.length - textBudget}，超出单次文本上限)`);
+						textBudget = 0;
+						truncated++;
+					} else {
+						emit(`${heading}\n（省略 ${full.length} 字符：本次 expand 已达文本上限 ${MAX_TEXT_CHARS} 字符）`);
+						truncated++;
+					}
 					attach(msg, `#${n}`);
 				};
 
@@ -167,6 +192,7 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 				if (wantImage && !sawImage) emit("（这些条目里没有图片）");
+				if (truncated > 0) emit(`（${truncated} 条因超出单次文本上限 ${MAX_TEXT_CHARS} 字符而被截断；用更小的 expand 分批取）`);
 				flush();
 				return { content, details: undefined };
 			}
@@ -200,10 +226,12 @@ export default function (pi: ExtensionAPI) {
 
 			// query
 			if (typeof params.query === "string" && params.query.trim()) {
-				const terms = params.query.toLowerCase().split(/\s+/).filter((t: string) => t.length > 1);
+				// 单字符关键词也允许（中文里一个字经常就是关键词）
+				const terms = params.query.toLowerCase().split(/\s+/).filter((t: string) => t.length > 0);
 				const hits = msgs
 					.map((m) => {
-						const body = render(m.msg, false).toLowerCase();
+						// 搜索走全文，不用预览用的 800 字符截断
+						const body = render(m.msg, true).toLowerCase();
 						let score = 0;
 						for (const t of terms) {
 							const c = body.split(t).length - 1;

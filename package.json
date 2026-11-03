@@ -2,13 +2,26 @@
   "name": "pi-compaction",
   "version": "0.1.0",
   "description": "Algorithmic context compaction for pi — filter and truncate instead of an LLM summary, with #N recall of the originals",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions/pi-compaction.ts", "./extensions/pi-recall.ts"]
+    "extensions": [
+      "./extensions/pi-compaction.ts",
+      "./extensions/pi-recall.ts"
+    ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.74.0 <2.0.0",
+    "typebox": ">=1.1.24 <2.0.0"
+  },
+  "scripts": {
+    "test": "bun run tests/compaction.test.ts && bun run tests/recall.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   }
 }
