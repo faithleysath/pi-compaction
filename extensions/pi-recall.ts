@@ -98,14 +98,17 @@ const NumLike = (description: string) => Type.Union([Type.Number(), Type.String(
 /**
  * 切一块 [start, end)。三条硬约束：
  * 1. start < end <= full.length（`offset < total` 时）—— 否则 next_offset 不前进，模型会死循环；
- * 2. 尽量不切断行：先向回找换行（最多 SNAP_WINDOW 字符），找不到才处理代理对；
+ * 2. 起点和终点都落在码元边界上：终点尽量对齐换行、绝不对齐到代理对中间；
+ *    起点只在手写 offset 落在代理对中间时触发，退到高代理项（宁可重叠 1 码元也不丢字）；
  * 3. 绝不拆代理对。碰上就向后多拿 1 个码元（即实际可能比 limit 多 1）——
  *    孤立代理项跨过 JSON / 传输层 / 模型编码可能变成 U+FFFD，宁可多 1 码元也不能伤字；
  *    向前多拿天然保住约束 1，不需要再为了进展去拆字。
  */
 const sliceChunk = (full: string, offset: number, limit: number) => {
 	const total = full.length;
-	const start = Math.min(Math.max(0, offset), total);
+	let start = Math.min(Math.max(0, offset), total);
+	// 起点对齐：next_offset 永远是合法边界，这里只挡手写的 offset
+	if (start > 0 && start < total && isLowSurrogate(full.charCodeAt(start)) && isHighSurrogate(full.charCodeAt(start - 1))) start--;
 	let end = Math.min(start + limit, total);
 	if (end < total) {
 		const nl = full.lastIndexOf("\n", end - 1);
@@ -225,16 +228,17 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const total = full.length;
-				const meta: string[] = [`total_chars: ${total}`, `offset: ${offset}`];
-				if (limit !== asked) meta.push(`limit: ${limit}（你要的 ${asked} 超过上限，已夹到 ${MAX_SLICE_CHARS}）`);
-
 				if (offset > total) {
-					meta.push(`has_more: false`, `offset 超出总长度，最大可用 offset 是 ${total}`);
-					return asText(`${label}\n${meta.join("\n")}\n\n（这条已到末尾，没有更多内容）`);
+					return asText(
+						`${label}\ntotal_chars: ${total}\noffset: ${offset}\nhas_more: false\noffset 超出总长度，最大可用 offset 是 ${total}\n\n（这条已到末尾，没有更多内容）`,
+					);
 				}
 
-				const { chunk, end, hasMore } = sliceChunk(full, offset, limit);
+				const { start, end, chunk, hasMore } = sliceChunk(full, offset, limit);
 				const pct = total === 0 ? 100 : Math.floor((end / total) * 100);
+				const meta = [`total_chars: ${total}`, `offset: ${start}`];
+				if (start !== offset) meta.push(`（你要的 offset ${offset} 落在 emoji 中间，已对齐到码元边界 ${start}）`);
+				if (limit !== asked) meta.push(`limit: ${limit}（你要的 ${asked} 超过上限，已夹到 ${MAX_SLICE_CHARS}）`);
 				meta.push(
 					`returned_chars: ${chunk.length}`,
 					`next_offset: ${hasMore ? end : "null"}`,

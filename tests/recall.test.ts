@@ -207,6 +207,21 @@ console.log("\n[10] slice：换行对齐 / emoji 边界 / 必须有进展");
   check("limit:1 也不吐孤立代理项", tiny.chunks.every((c) => !hasLoneSurrogate(c)), tiny.chunks.slice(0, 3));
   check("所有分块都不含孤立代理项", [...all.chunks, ...eAll.chunks].every((c) => !hasLoneSurrogate(c)));
 
+  // 手写的 offset 落在代理对中间：退到高代理项，并在元数据里报实际 offset
+  const mid = await call(eEntries, { slice: { message: 0, offset: 8, limit: 5 } });
+  check("手动 offset 落在 emoji 中间时已对齐", mid.text.includes("offset: 7") && mid.text.includes("已对齐"), mid.text.slice(0, 220));
+  check("对齐后正文不含孤立代理项", !hasLoneSurrogate(bodyOf(mid.text)), mid.text.slice(0, 200));
+
+  // 任意 offset（含每一个中间码元）都不应吐出孤立代理项
+  const small = [mk("u9", "user", T("a😀b😀c"))];
+  const smallTotal = `[user]\n${"a😀b😀c"}`.length;
+  let sweepOk = true, sweepAt = -1;
+  for (let off = 0; off <= smallTotal; off++) {
+    const r = await call(small, { slice: { message: 0, offset: off, limit: 2 } });
+    if (hasLoneSurrogate(bodyOf(r.text))) { sweepOk = false; sweepAt = off; break; }
+  }
+  check("任意 offset（0..total）都不产生孤立代理项", sweepOk, sweepAt);
+
   // 为了不拆代理对，实际返回可能比 limit 多 1 个码元，但不会更多
   const one = await call(eEntries, { slice: { message: 0, offset: 7, limit: 1 } });
   check("碰 emoji 边界时只多拿 1 个码元", one.text.includes("returned_chars: 2"), one.text.slice(0, 140));
