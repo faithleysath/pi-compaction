@@ -133,6 +133,15 @@ M src/auth/session.ts
 [background] bg-1 启动：npm run build（状态用 bash_tasks 查）
 ```
 
+除非同一段里启动了多个任务 —— 命令是**按「调用 → 结果」配对**的，不是拿第一条套全部：
+
+```
+（调用工具 4 次 #2–#5）
+
+[background] bg-1 启动：npm run build（状态用 bash_tasks 查）
+[background] bg-2 启动：npm test（状态用 bash_tasks 查）
+```
+
 否则模型压缩后就不知道还有任务在跑。状态写的是压缩那一刻的，实时状态用 `bash_tasks` 查，
 日志用 `bash_output <id>` 取——两者都不受压缩影响。
 

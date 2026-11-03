@@ -193,22 +193,28 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 		if (!run.length) return;
 		let calls = 0;
 		const nums: number[] = [];
-		const starts: string[] = []; // 这段被折掉的工具调用里启动的后台任务 id
-		const cmds: string[] = []; // 同一段里的命令（给上面那行用）
+		// 后台任务：id 只出现在结果行里，命令在调用行的参数里 —— 必须按「调用→结果」配对，
+		// 不能拿第一条命令套给所有任务（同一段里跑 build 和 test 就会张冠李戴）。
+		const started: { id: string; cmd: string }[] = [];
+		const pending: string[] = []; // 已经出现、还没等到结果的命令，先进先出
+		let lastCmd = "";
 		for (const b of run) {
 			const head = b.lines[0];
-			if (head.startsWith("* ")) calls++;
+			if (head.startsWith("* ")) {
+				calls++;
+				const cmd = head.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+				lastCmd = cmd ? cmd.replace(/\\"/g, '"').replace(/\\n/g, " ⏎ ").slice(0, 120) : "";
+				if (lastCmd) pending.push(lastCmd);
+			} else {
+				// 一条结果消耗一条命令（无论它是不是后台任务，保持队列对齐）
+				const cmd = pending.length ? pending.shift()! : lastCmd;
+				for (const l of b.lines) {
+					const st = l.match(BG_START);
+					if (st) started.push({ id: st[1], cmd });
+				}
+			}
 			const m = head.match(/#(\d+)/);
 			if (m) nums.push(Number(m[1]));
-			if (head.startsWith("* ")) {
-				const cmd = head.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
-				if (cmd) cmds.push(cmd.replace(/\\"/g, '"').replace(/\\n/g, " ⏎ ").slice(0, 120));
-			}
-			// 后台任务的 id 只出现在结果行里；命令在同一段的 `* ` 行参数里
-			for (const l of b.lines) {
-				const st = l.match(BG_START);
-				if (st) starts.push(st[1]);
-			}
 		}
 		if (calls === 0) {
 			// 只有结果行（正常不会发生），原样吐回去
@@ -217,9 +223,8 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			out.push(marker({ calls, lo: Math.min(...nums), hi: Math.max(...nums) }));
 			// 折叠会吞掉「Started background task bg-1」，模型就不知道还有任务在跑。
 			// 补一行记录（状态是压缩那一刻的，要用 bash_tasks 查实时）。
-			for (const id of starts) {
-				const cmd = cmds.length ? `：${cmds[0]}` : "";
-				out.push(`[background] ${id} 启动${cmd}（状态用 bash_tasks 查）`);
+			for (const { id, cmd } of started) {
+				out.push(`[background] ${id} 启动${cmd ? `：${cmd}` : ""}（状态用 bash_tasks 查）`);
 			}
 		}
 		run = [];

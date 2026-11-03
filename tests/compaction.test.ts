@@ -440,6 +440,65 @@ console.log("\n[9h] 折叠不吞掉后台任务 id");
   check("工具调用本身仍被折叠", /（调用工具 \d+ 次 #/.test(s));
 }
 
+console.log("\n[9h2] 多个后台任务必须各自配对正确的命令");
+{
+  const mkPrev = (body: string[]) =>
+    ["格式：x", "", ...body, "", "---", "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。"].join("\n");
+  const entries = (): Entry[] => [user("u1", "q"), asst("a1", "a"), user("u2", "后续 " + "x".repeat(4000))];
+  const bgLines = (prev: string) => {
+    const { res } = run(entries(), { reason: "manual", firstKept: "u2", prev });
+    return ((res?.compaction?.summary ?? "") as string).split("\n").filter((l: string) => l.startsWith("[background]"));
+  };
+
+  // 串行：调用→结果→调用→结果
+  const seq = bgLines(mkPrev([
+    "[user#1]", "都跑一下",
+    "", "* bash#2 {\"command\":\"npm run build\",\"background\":true}",
+    "", "→#3 Started background task bg-1. Its completion is reported automatically.",
+    "", "* bash#4 {\"command\":\"npm test\",\"background\":true}",
+    "", "→#5 Started background task bg-2. Its completion is reported automatically.",
+  ]));
+  check("串行：bg-1 配 build", seq.some((l: string) => /bg-1 .*npm run build/.test(l)), seq);
+  check("串行：bg-2 配 test", seq.some((l: string) => /bg-2 .*npm test/.test(l)), seq);
+
+  // 并行：两个调用连着，两个结果连着
+  const par = bgLines(mkPrev([
+    "[user#1]", "并行跑",
+    "", "* bash#2 {\"command\":\"bun run build:web\",\"background\":true}",
+    "", "* bash#2 {\"command\":\"bun run build:api\",\"background\":true}",
+    "", "→#3 Started background task bg-7. Its completion is reported automatically.",
+    "", "→#4 Started background task bg-8. Its completion is reported automatically.",
+  ]));
+  check("并行：bg-7 配 build:web", par.some((l: string) => /bg-7 .*build:web/.test(l)), par);
+  check("并行：bg-8 配 build:api", par.some((l: string) => /bg-8 .*build:api/.test(l)), par);
+
+  // 普通调用夹在前面，队列不能错位
+  const mixed = bgLines(mkPrev([
+    "[user#1]", "先读再跑",
+    "", "* read#2 {\"path\":\"a.ts\"}",
+    "", "→#3 文件内容",
+    "", "* bash#4 {\"command\":\"bun test\",\"background\":true}",
+    "", "→#5 Started background task bg-9. Its completion is reported automatically.",
+  ]));
+  check("夹着普通调用时仍配对方", mixed.some((l: string) => /bg-9 .*bun test/.test(l)), mixed);
+
+  // 没有后台任务 → 不该产出记录
+  const none = bgLines(mkPrev([
+    "[user#1]", "只跑前台",
+    "", "* bash#2 {\"command\":\"ls\"}",
+    "", "→#3 a.ts",
+  ]));
+  check("没有后台任务时不产出记录", none.length === 0, none);
+
+  // 命令里的转义引号要还原
+  const quoted = bgLines(mkPrev([
+    "[user#1]", "带引号",
+    "", "* bash#2 {\"command\":\"echo \\\"hi\\\" && sleep 1\",\"background\":true}",
+    "", "→#3 Started background task bg-10. Its completion is reported automatically.",
+  ]));
+  check("转义引号被还原", quoted.some((l: string) => l.includes('echo "hi" && sleep 1')), quoted);
+}
+
 console.log("\n[9i] 旧轮次的 pi-bg-bash 通知折成一行");
 {
   const prev = [
