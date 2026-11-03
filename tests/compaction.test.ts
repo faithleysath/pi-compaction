@@ -494,6 +494,35 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
   ));
   check("命令里的换行压成 ⏎", quoted.bg.some((l: string) => l.includes('echo "hi" && ⏎ sleep 1')), quoted.bg);
 
+  // ── 误识别防护：别的工具正文里提到这句话，不能被当成后台任务启动 ──
+  const mkOne = (toolName: string, args: any, result: string): Entry[] => {
+    const es: Entry[] = [
+      user("u1", "q"),
+      { id: "a1", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "tc", name: toolName, arguments: args }] } },
+      { id: "r1", type: "message", message: { role: "toolResult", toolCallId: "tc", toolName, content: [{ type: "text", text: result }] } },
+      user("u2", "后续 " + "x".repeat(4000)),
+    ];
+    return es;
+  };
+  const renderWith = (es: Entry[]) => (run(es, { reason: "manual", firstKept: "u2" }).res?.compaction?.summary ?? "") as string;
+
+  const readDoc = renderWith(mkOne("read", { path: "BUG.md" }, `# 缺陷报告\n\n用户看到：\n${S("bg-1")}\n\n需要排查。`));
+  check("read 的正文里提到这句时不改写", !readDoc.includes("Started background task bg-1（cmd"), readDoc.slice(0, 300));
+  check("read 的正文完整保留", readDoc.includes("缺陷报告") && readDoc.includes("需要排查"), readDoc.slice(0, 300));
+
+  const grepHit = renderWith(mkOne("grep", { pattern: "x" }, `src/x.ts:42: ${S("bg-2")}`));
+  check("grep 命中这句时不当后台任务", !grepHit.includes("Started background task bg-2（cmd"), grepHit.slice(0, 300));
+
+  const noFlag = renderWith(mkOne("bash", { command: "npm run build" }, S("bg-3")));
+  check("bash 没带 background:true 时不改写", !noFlag.includes("Started background task bg-3（cmd"), noFlag.slice(0, 300));
+
+  const catFile = renderWith(mkOne("bash", { command: "cat x", background: true }, `正文内容\n${S("bg-4")}`));
+  check("bash 后台但正文是文件时不改写", !catFile.includes("Started background task bg-4（cmd"), catFile.slice(0, 300));
+  check("文件正文完整保留", catFile.includes("正文内容"), catFile.slice(0, 300));
+
+  const noDot = renderWith(mkOne("bash", { command: "x", background: true }, "Started background task bg-5 without the period"));
+  check("形状不完全一致时不改写", !noDot.includes("Started background task bg-5（cmd"), noDot.slice(0, 300));
+
   // 老格式摘要（命令只写在 `*` 行）：不崩，只是没有命令
   const legacyPrev = [
     "格式：x", "",

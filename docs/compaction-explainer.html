@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>448 行 pi 压缩扩展 · 动画解读</title>
+<title>469 行 pi 压缩扩展 · 动画解读</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#11161f; --panel2:#0e131b; --line:#1e2633;
@@ -199,7 +199,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>448 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
+    <h1>469 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
     <div class="nav">
       <div class="dots" id="dots"></div>
       <button id="prev">←</button>
@@ -427,7 +427,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 	const bgNotice = (lines: string[]): string | null => {
 		if (lines[0] !== "[user]") return null;
 		const first = lines[1] ?? "";
-		const fin = first.match(/^Background task (\S+) finished: ([^,\n]+)/);
+		const fin = first.match(BG_FINISH);
 		if (fin) return `[background] ${fin[1]} 完成：${fin[2]}`;
 		if (!first.startsWith("Background command output")) return null;
 		const idLine = lines.find((l) => /^Task \S+;/.test(l));
@@ -463,7 +463,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			const m = head.match(/#(\d+)/);
 			if (m) nums.push(Number(m[1]));
 			for (const l of b.lines) {
-				const st = l.match(BG_START);
+				const st = l.match(BG_START_LINE);
 				if (!st) continue;
 				const cmd = l.match(/（cmd: ([^）]*)）/)?.[1] ?? "";
 				started.push({ id: st[1], cmd });
@@ -528,9 +528,20 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
  */
 const CUSTOM_HEAD_LINES = 4;
 
-/** 后台任务被启动 / 完成时，通知里固定出现的两句话 */
-const BG_START = /Started background task ([A-Za-z][\w-]*)/;
-const BG_FINISH = /Background task ([A-Za-z][\w-]*) finished: ([^,\n]+)/;
+/**
+ * pi-bg-bash 启动后台任务时，bash 工具的结果**整段**就是这一句：
+ *
+ *   Started background task bg-6. Its completion is reported automatically and starts
+ *   your next turn: if nothing else is left to do, end your turn now instead of sleeping or polling.
+ *
+ * 锚点很重要：不加 `^` 会误命中「别的工具的正文里恰好提到这句话」的情形 ——
+ * 比如 read 读一份讲这个 bug 的文档，整份文件内容会被替换成一行后台任务记录。
+ * 这里要求行首 + 整段就是这句话（后面可有可无），且工具必须是 bash。
+ */
+const BG_START = /^Started background task ([A-Za-z][\w-]*)\.(?:[\s\S]*)$/;
+/** 折叠旧轮次时，从已经渲染好的行里认这句（行首 `→#N ` 之后） */
+const BG_START_LINE = /^→#?\d* ?Started background task ([A-Za-z][\w-]*)/;
+const BG_FINISH = /^Background task ([A-Za-z][\w-]*) finished: ([^,\n]+)/;
 
 /** `!cmd` 的执行状态尾巴。pi 自己的 bashExecutionToText 就是这么写的，别丢 */
 const bashStatus = (m: any) => {
@@ -556,16 +567,20 @@ const makeRender =
 	(entries: { sourceEntry: any; messages: any[] }[], ref: Map<string, number>): string => {
 		const clipResult = (s: string) => clipHeadTail(s, cfg.toolResultHead, cfg.toolResultTail);
 
-		// toolCallId → 命令。用来把「Started background task bg-1」和它自己的那条 bash 精确绑上。
-		// 靠位置配对会错：并行调用里 read 没有 command，但它的结果照样占一个位置。
-		const cmdByCall = new Map<string, string>();
+		// toolCallId → 那次调用是不是「background: true 的 bash」以及它的命令。
+		// 两条用途：把后台任务 id 和它自己的命令精确绑上（位置配对会错位）；
+		// 以及验证某条 toolResult 确实是后台任务启动，而不是文件正文里恰好提到这句话。
+		const bgCall = new Map<string, { cmd: string; isBg: boolean }>();
 		for (const { messages } of entries) {
 			for (const m of messages) {
 				if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
 				for (const b of m.content) {
 					if (b?.type !== "toolCall") continue;
 					const c = b.arguments?.command;
-					if (typeof c === "string" && c) cmdByCall.set(b.id, c.replace(/\s*\n\s*/g, " ⏎ ").slice(0, 120));
+					bgCall.set(b.id, {
+						cmd: typeof c === "string" && c ? c.replace(/\s*\n\s*/g, " ⏎ ").slice(0, 120) : "",
+						isBg: b.arguments?.background === true,
+					});
 				}
 			}
 		}
@@ -614,12 +629,18 @@ const makeRender =
 					out.push(`[user${t}]\n${esc(text(m.content))}`);
 				} else if (role === "toolResult") {
 					const body = text(m.content);
-					const bg = body.match(BG_START);
+					// 三重校验，缺一不可：
+					//   1. 工具是 bash
+					//   2. 那次调用确实带了 background: true（toolCallId 查得到）
+					//   3. 结果整段就是 pi-bg-bash 的那句话（行首 + 只有这一句）
+					// 少了任何一条，read 读一份讲这个 bug 的文档就会被误判成启动结果。
+					const call = m.toolCallId ? bgCall.get(m.toolCallId) : undefined;
+					const bg = m.toolName === "bash" && call?.isBg ? body.trim().match(BG_START) : null;
 					if (bg) {
 						// 这条固定是「Started background task bg-N. 后面一大段别轮询的提示」。
 						// 摘掉那段提示（190 字，折叠后毫无价值），换成这条调用自己的命令 ——
 						// 命令用 toolCallId 查，和消息位置无关，并行/乱序都不会配错。
-						const cmd = m.toolCallId ? cmdByCall.get(m.toolCallId) : undefined;
+						const cmd = call?.cmd || undefined;
 						out.push(`→${t} Started background task ${bg[1]}${cmd ? `（cmd: ${esc(cmd)}）` : ""}（完成时自动通知，别轮询）`);
 						continue;
 					}
