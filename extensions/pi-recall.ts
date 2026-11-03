@@ -14,12 +14,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PAGE = 5;
 
-/** 一次最多带回多少张图 —— 本机实测中位数一张 446 KB、p99 2.6 MB，不设上限能把上下文撑爆 */
+/** 一次最多带回多少张图 —— 抽样里中位数一张约 446 KB、p99 约 2.6 MB，不设上限能把上下文撑爆 */
 const MAX_IMAGES = 6;
 /** 单次照片总字节上限（base64 后），超了就停，避免一次 recall 把请求体顶到几十 MB */
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 /**
- * 单次 expand 的文本上限（字符）。本机最大的单条 toolResult 是 129,036 字符 ≈ 32k tok，
+ * 单次 expand 的文本上限（字符）。见过最大的单条 toolResult 约 129k 字符 ≈ 32k tok，
  * 不限量的话 expand:[1..100] 能把 1M 窗口一次吃掉。默认 60k 字符 ≈ 15k tok。
  */
 const MAX_TEXT_CHARS = 60_000;
@@ -60,7 +60,7 @@ const text = (c: unknown): string =>
  * 一条消息 → 纯文本（assistant 带 toolCall 名与参数，toolResult 带全文）。
  *
  * `full: true` 不截断，`full: false` 截到 800 字符 —— 后者只用于预览。
- * **搜索必须用 full: true**：本机 99% 的超长消息在 800 字符之后还有实质内容，
+ * **搜索必须用 full: true**：抽样里 99% 的超长消息在 800 字符之后还有实质内容，
  * 拿预览文本去搜等于只看前 800 字。
  */
 const render = (msg: any, full: boolean): string => {

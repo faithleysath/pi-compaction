@@ -3,7 +3,7 @@
 `bun test` 里的两个文件测的是**机制**（压缩产物、编号、转义、分块拼接），不测**行为** ——
 一个提示词改动能不能让模型在该召回的时候召回，只能拿真模型跑。
 
-所以这一套单独放，默认不进 `bun test`：要花 API 钱、依赖模型版本和本机 pi 配置。
+所以这一套单独放，默认不进 `bun test`：要花 API 钱、依赖模型版本和运行环境的 pi 配置。
 
 ## 跑
 
@@ -15,9 +15,10 @@ bun run tests/e2e/run.ts c --variants=current,tail-note-long   # A/B 两个提�
 bun run tests/e2e/run.ts --model=zcode/GLM-5.3  # 指定模型
 ```
 
-需要 `pi` 在 PATH（或 `PI_BIN` 指过去）、`magpie` provider 可用。
+需要 `pi` 在 PATH（或 `PI_BIN` 指过去），以及一个可用的模型：默认 `zcode/GLM-5.3`，
+用 `--model` 或 `E2E_MODEL` 换。
 找不到 `pi` 时直接跳过并退出 0，不会在 CI 上无故变红。
-场景 B 额外需要本机装了 `pi-bg-bash`，没装就只报一条 FAIL 说明，不伪装成通过。
+场景 B 额外需要运行环境装了 `pi-bg-bash`，没装就只报一条 FAIL 说明，不伪装成通过。
 
 产物落在 `tests/e2e/.runs/`（已 gitignore）：
 

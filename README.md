@@ -89,7 +89,7 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 研究完了，脚手架已经写好……
 
 [user#12]
-先看下 pi-vcc 怎么写的
+先看下 pi 官方扩展怎么写的
 
 (collapsed 26 tool calls #13–#55)
 ```
@@ -99,7 +99,7 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 - 行内带编号范围，`recall range: [2, 10]` 就能取回原文
 - 只有最新一轮保留完整细节
 
-摘要大小实测：
+摘要大小实测（同一组对话，关闭 / 开启各跑一遍）：
 
 | 轮次 | `collapseOldTools: false` | `true` | 省 |
 |---|---|---|---|
@@ -223,8 +223,8 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
   的原始消息」，涨的只有摘要那一条。实测每轮约 +770 字节（消息很短时），真实会话里约 6–10 KB/轮。
 - **摘要占满窗口后 pi 不会再调压缩**。摘要涨到「窗口 − reserveTokens − 尾巴」这个规模时，
   pi 的 `prepareCompaction` 会因为「保留尾巴没超过 keepRecentTokens」返回 undefined，
-  压缩 hook 根本不会被调用 —— 这时只能 `/new`。本机 1M 窗口、工具输出 3000 字/条的实测：
-  35 次压缩之后进入这个状态（用旧的「保留 20 条」策略是 19 次）。
+  压缩 hook 根本不会被调用 —— 这时只能 `/new`。在 1M 窗口、工具输出约 3000 字/条的模拟会话里，
+  第 35 次压缩之后进入这个状态（早期按固定 20 条保留的版本是 19 次）。
 - **monorepo 子目录不支持**。pi 的 git 源只能指向仓库根目录。
 
 ## 原理

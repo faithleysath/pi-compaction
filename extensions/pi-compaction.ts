@@ -24,7 +24,7 @@ import { buildSessionProjection, getAgentDir } from "@earendil-works/pi-coding-a
  * - toolResultHead / toolResultTail：工具结果的头尾长度。bash 的 exit code、报错、栈底
  *   都在末尾，只取头会把「失败了」这条消息整个切掉。
  *
- * 实测本机 toolResult 的 p50 = 411、p90 = 6333，默认 200 + 100 能覆盖一半以上。
+ * 抽样统计里 toolResult 的 p50 ≈ 411、p90 ≈ 6333 字符，默认 200 + 100 能覆盖一半以上。
  */
 const DEFAULTS = {
 	toolArgs: 300,
@@ -84,7 +84,7 @@ const clipHeadTail = (s: string, head: number, tail: number) => {
 /**
  * 转义正文。正文是任意文本（README / 日志 / 用户粘贴），它自己也能写出
  * `[user#1]`、`* bash#2`、`→#3`、`…(+N)`、`</summary>` —— 不转义就能伪装成我们的条目。
- * 只在真的要撞的时候加一个反斜杠，实测开销接近于零（本机整段压缩 +7 字符）。
+ * 只在真的要撞的时候加一个反斜杠，开销接近于零（一份 21k token 的摘要整段压缩只多 7 个字符）。
  */
 const esc = (s: string) =>
 	s
@@ -99,7 +99,7 @@ const esc = (s: string) =>
 		.replace(/^---\s*$/gm, "\\---");
 
 /**
- * 摘要开头的一行格式说明。实测（本机 24 次）：不加时模型只有 ~60% 能分清
+ * 摘要开头的一行格式说明。实测（24 次小样本）：不加时模型只有 ~60% 能分清
  * 「条目」和「正文里长得像条目的字面文本」，加上后 20/24、12/12。
  * 代价：英文版 ~390 字符 ≈ 95 token（中文版字少但 CJK 每 token 字符少，token 数相当），
  * 比把正文全部缩进（+743 token）便宜得多。这行随历史每轮重发，改之前先算账。
