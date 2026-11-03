@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>187 行 pi 压缩扩展 · 动画解读</title>
+<title>334 行 pi 压缩扩展 · 动画解读</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#11161f; --panel2:#0e131b; --line:#1e2633;
@@ -153,6 +153,7 @@
   .sumline .img{color:#7dd3fc; opacity:.85}
   .sumline.fmtnote{color:#6b7788; font-style:italic; border-left:2px solid #2a3341; padding-left:7px}
   .sumline.fmtnote.on{max-height:80px}
+  .sumline .foldmark{color:#c084fc; background:#241a2e; border-radius:4px; padding:1px 6px; display:inline-block}
   .keptcard{max-height:0; opacity:0; overflow:hidden; border-width:0; padding:0; transition:max-height .5s, opacity .45s, border-width .2s}
   .keptcard.on{max-height:460px; opacity:1; border-width:1px}
   .keptcard .card-b{max-height:0; opacity:0; padding-top:0; padding-bottom:0; transition:max-height .5s, opacity .4s, padding .4s}
@@ -198,7 +199,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>187 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
+    <h1>334 行 pi-compaction<span>pi 扩展 · 逐行动画解读</span></h1>
     <div class="nav">
       <div class="dots" id="dots"></div>
       <button id="prev">←</button>
@@ -261,39 +262,90 @@
 /**
  * pi-compaction — 用「过滤 + 截断」代替 pi 的 LLM 摘要。
  *
- * 触发时机完全交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
+ * 触发时机和切点都交给 pi（自动阈值 / 溢出恢复 / 手动 /compact），只替换压缩过程：
+ *   切点 = event.preparation.firstKeptEntryId（pi 按 compaction.keepRecentTokens 算好的，默认 20000 tok）
  *   用户消息原文保留 / 助手正文原文保留 / thinking 丢弃 / 图片只留 [image png] 占位
- *   工具参数截断到 500 字（取头部）；工具结果 500 字（头 350 + 尾 150，exit code / 报错在末尾）
- *   最近 20 条消息原样保留（真实消息，不是文本）
+ *   工具参数的截断长度、工具结果的头/尾长度各自可配（~/.pi/agent/pi-compaction.json）
  *   编号在标题行里：[user#1] / [assistant#2] / * read#2 / →#3，可用 recall 取原文
  *
  * 铁律：永远不 return undefined / 不抛错给 pi —— 那两条路径都会落到 pi 的默认 LLM 摘要。
  */
 
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** 尾部原样保留的消息条数。实测 20 条 ≈ 6.3k token（1M 窗口的 0.6%），够覆盖一到两个完整工具回合 */
-const KEEP_MSGS = 20;
 /**
- * 工具参数 / 结果的截断长度。实测本机 toolResult 的 p50 = 411、p90 = 6333，
- * 500 刚好在 p50 之上 —— 一半以上的结果原样进摘要，长的才截。
+ * 三个截断长度，单位都是字符（不是 token）。
+ *
+ * - toolArgs：工具参数的头部长度。JSON 的关键字段（command / path / pattern）都在前面。
+ * - toolResultHead / toolResultTail：工具结果的头尾长度。bash 的 exit code、报错、栈底
+ *   都在末尾，只取头会把「失败了」这条消息整个切掉。
+ *
+ * 实测本机 toolResult 的 p50 = 411、p90 = 6333，默认 200 + 100 能覆盖一半以上。
  */
-const TOOL_CHARS = 500;
+const DEFAULTS = {
+	toolArgs: 300,
+	toolResultHead: 200,
+	toolResultTail: 100,
+	/** 多轮压缩时，把旧轮次里的工具调用折成一行「调用工具 N 次 #a–#b」，只有最新一轮保留细节 */
+	collapseOldTools: true,
+};
 
-const HEAD = Math.round(TOOL_CHARS * 0.7); // 350
-const TAIL = TOOL_CHARS - HEAD; // 150
+const CONFIG_PATH = join(getAgentDir(), "pi-compaction.json");
 
-/** 工具参数：只取头部（JSON 的关键字段在前） */
+type ClipConfig = typeof DEFAULTS;
+
+const isCharCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+/**
+ * 读配置。每次压缩读一次（压缩很少发生，开销可以忽略），这样改完配置不用重启。
+ * 单项非法就用该项的默认值，整个文件坏了就用全部默认值 —— 绝不因为配置问题影响压缩。
+ */
+const loadConfig = (): ClipConfig => {
+	let raw: any;
+	try {
+		raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+	} catch {
+		return { ...DEFAULTS };
+	}
+	// 老版本只有一个 toolChars：按 70% / 30% 拆成头尾，工具参数沿用它
+	if (raw?.toolChars !== undefined) {
+		const n = raw.toolChars;
+		if (isCharCount(n) && n > 0) {
+			const head = Math.round(n * 0.7);
+			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head, collapseOldTools: DEFAULTS.collapseOldTools };
+		}
+	}
+	return {
+		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
+		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
+		toolResultTail: isCharCount(raw?.toolResultTail) ? raw.toolResultTail : DEFAULTS.toolResultTail,
+		collapseOldTools: typeof raw?.collapseOldTools === "boolean" ? raw.collapseOldTools : DEFAULTS.collapseOldTools,
+	};
+};
+
+/** 第一次跑的时候生成一份默认配置，省得用户不知道有这个开关 */
+const scaffoldConfig = () => {
+	if (existsSync(CONFIG_PATH)) return;
+	try {
+		writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULTS, null, 2)}\n`);
+	} catch {
+		// 只读文件系统之类的情况，忽略
+	}
+};
+
+/** 只保留头部 n 个字符（工具参数用） */
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)}…(+${s.length - n})`);
 
-/** 工具结果：头 70% + 尾 30%（bash 的 exit code、报错、栈底都在末尾） */
-const clipTail = (s: string) => {
-	if (s.length <= TOOL_CHARS) return s;
-	const cut = s.length - TOOL_CHARS;
-	// 只超一点点：截头就够，不值得为几十个字插两个标记
-	if (cut < TAIL) return `${s.slice(0, TOOL_CHARS)}…(+${cut})`;
-	return `${s.slice(0, HEAD)}…(+${cut})…${s.slice(-TAIL)}`;
+/** 保留头 head 个 + 尾 tail 个（工具结果用）。头尾都是 0 时会退化成只剩一个截断标记 */
+const clipHeadTail = (s: string, head: number, tail: number) => {
+	if (s.length <= head + tail) return s;
+	const cut = s.length - head - tail;
+	const h = s.slice(0, head);
+	const t = tail > 0 ? s.slice(-tail) : "";
+	return `${h}…(+${cut})${tail > 0 ? "…" : ""}${t}`;
 };
 
 /**
@@ -315,12 +367,13 @@ const esc = (s: string) =>
  * 84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。
  */
 const FORMAT_NOTE =
-	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本。";
+	"格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取。";
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。";
 const TAIL_RE = /\n*---\n可用 recall 工具按 #N 取原文[^\n]*\n?\s*$/;
-const FORMAT_RE = new RegExp(`^${FORMAT_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n*`);
+/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
+const FORMAT_RE = /^格式：[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
@@ -348,93 +401,188 @@ const isVisible = (e: any) =>
 	e.type === "custom_message" ||
 	e.type === "branch_summary";
 
-const render = (entries: any[], ref: Map<string, number>): string => {
-	const out: string[] = [];
-	for (const e of entries) {
-		const r = ref.get(e.id);
-		const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
-		const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
-		if (!msg) continue;
-		if (msg.role === "bashExecution") {
-			// 用户敲的 ! 命令：命令原文，输出头+尾截断
-			// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
-			if (msg.excludeFromContext) continue;
-			out.push(`[user${t}] $ ${esc(msg.command)}\n${clipTail(msg.output ?? "")}`);
-			continue;
-		}
-		for (const m of convertToLlm([msg])) {
-			if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
-			else if (m.role === "toolResult") out.push(`→${t} ${clipTail(esc(text(m.content)))}`);
-			else if (m.role === "assistant" && Array.isArray(m.content)) {
-				// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
-				let buf: string[] = [];
-				const flush = () => {
-					if (buf.length) out.push(`[assistant${t}]\n${buf.join("\n")}`);
-					buf = [];
-				};
-				for (const p of m.content as any[]) {
-					if (p.type === "text") buf.push(esc(p.text));
-					else if (p.type === "image") buf.push(imgTag(p.mimeType));
-					else if (p.type === "toolCall") {
-						flush();
-						out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), TOOL_CHARS)}`);
-					}
-					// thinking 块直接不输出
-				}
-				flush();
-			}
-		}
+/**
+ * 取出「还没被折叠」的那段条目。
+ *
+ * event.branchEntries 是整个分支（根 → 叶），上一轮被压掉的消息也在里面 ——
+ * 它们已经变成 previousSummary 的一段文本了。如果从头渲染，第 2 轮就会把
+ * 同一批内容再渲染一遍（实测摘要膨胀 3.4 倍，第 3 轮更糟）。
+ *
+ * 所以找到最后一个 compaction 条目，从它的 firstKeptEntryId 开始算。
+ * 找不到那个 id（比如上轮用了 compact-all 的空串哨兵）就从 compaction 之后开始。
+ */
+const liveFromLastCompaction = (branch: any[]) => {
+	let start = 0;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if (branch[i].type !== "compaction") continue;
+		const keepId = branch[i].firstKeptEntryId;
+		const ki = keepId ? branch.findIndex((e: any) => e.id === keepId) : -1;
+		start = ki >= 0 ? ki : i + 1;
+		break;
 	}
-	return out.join("\n\n");
+	return branch.slice(start).filter(isVisible);
 };
 
+/**
+ * 多轮压缩时折叠旧轮次的工具调用。
+ *
+ * 上一轮的摘要原样前置进来，里面每条工具调用和结果都是两三行文本 —— 轮次一多，
+ * 摘要就被这些历史细节撑爆。这里把**连续的工具调用块**合并成一行
+ * 「（调用工具 N 次 #a–#b）」，用户消息和助手正文一字不动。
+ *
+ * 只处理 `* name#N ...` 和 `→#N ...` 开头的块。正文里长得像条目的行早被 esc()
+ * 加了反斜杠，不会误伤（`\* ` 不匹配 `^\* `）。
+ */
+const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: number; hi: number }) => string) => {
+	// 一个块 = 一个条目，从「行首是结构标记」到下一个结构标记为止
+	const NEW_BLOCK = /^(\[user(?=[#\]])|\[assistant(?=[#\]])|\* |→(?=[ #])|---\s*$)/;
+	const isToolLine = (l: string) => /^(\* |→(?=[ #]))/.test(l);
+
+	const lines = text.split("\n");
+	type Block = { tool: boolean; lines: string[] };
+	const blocks: Block[] = [];
+	let cur: Block | null = null;
+	for (const line of lines) {
+		if (NEW_BLOCK.test(line)) {
+			if (cur) blocks.push(cur);
+			cur = { tool: isToolLine(line), lines: [line] };
+		} else if (cur) cur.lines.push(line);
+		else cur = { tool: false, lines: [line] };
+	}
+	if (cur) blocks.push(cur);
+
+	const out: string[] = [];
+	let run: Block[] = [];
+	const flush = () => {
+		if (!run.length) return;
+		let calls = 0;
+		const nums: number[] = [];
+		for (const b of run) {
+			const head = b.lines[0];
+			if (head.startsWith("* ")) calls++;
+			const m = head.match(/#(\d+)/);
+			if (m) nums.push(Number(m[1]));
+		}
+		if (calls === 0) {
+			// 只有结果行（正常不会发生），原样吐回去
+			for (const b of run) out.push(b.lines.join("\n"));
+		} else {
+			out.push(marker({ calls, lo: Math.min(...nums), hi: Math.max(...nums) }));
+		}
+		run = [];
+	};
+	for (const b of blocks) {
+		if (b.tool) {
+			run.push(b);
+			continue;
+		}
+		flush();
+		out.push(b.lines.join("\n").replace(/\n+$/, ""));
+	}
+	flush();
+	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+};
+
+const makeRender =
+	(cfg: ClipConfig) =>
+	(entries: any[], ref: Map<string, number>): string => {
+		const clipResult = (s: string) => clipHeadTail(s, cfg.toolResultHead, cfg.toolResultTail);
+		const out: string[] = [];
+		for (const e of entries) {
+			const r = ref.get(e.id);
+			const t = r == null ? "" : `#${r}`; // 编号跟标题走，不和正文混
+			if (e.type === "branch_summary") {
+				// pi 会把它变成一条 user 消息（BRANCH_SUMMARY_PREFIX 包裹），这里直接给正文
+				if (!e.summary) continue;
+				out.push(`[user${t}]\n${esc(e.summary)}`);
+				continue;
+			}
+			const msg = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
+			if (!msg) continue;
+			if (msg.role === "bashExecution") {
+				// 用户敲的 ! 命令：命令原文，输出头+尾截断
+				// !! 开头（excludeFromContext）的是「只要结果、不进上下文」，pi 会丢掉，我们也得丢
+				if (msg.excludeFromContext) continue;
+				out.push(`[user${t}] $ ${esc(msg.command)}\n${clipResult(msg.output ?? "")}`);
+				continue;
+			}
+			for (const m of convertToLlm([msg])) {
+				if (m.role === "user") out.push(`[user${t}]\n${esc(text(m.content))}`);
+				else if (m.role === "toolResult") out.push(`→${t} ${clipResult(esc(text(m.content)))}`);
+				else if (m.role === "assistant" && Array.isArray(m.content)) {
+					// 正文和图片攒成一个块，共用同一个标题行；工具调用各自一行
+					let buf: string[] = [];
+					const flush = () => {
+						if (buf.length) out.push(`[assistant${t}]\n${buf.join("\n")}`);
+						buf = [];
+					};
+					for (const p of m.content as any[]) {
+						if (p.type === "text") buf.push(esc(p.text));
+						else if (p.type === "image") buf.push(imgTag(p.mimeType));
+						else if (p.type === "toolCall") {
+							flush();
+							out.push(`* ${p.name}${t} ${clip(esc(JSON.stringify(p.arguments ?? {})), cfg.toolArgs)}`);
+						}
+						// thinking 块直接不输出
+					}
+					flush();
+				}
+			}
+		}
+		return out.join("\n\n");
+	};
+
 export default function (pi: ExtensionAPI) {
+	pi.on("session_start", () => {
+		scaffoldConfig();
+	});
+
 	pi.on("session_before_compact", (event, ctx) => {
 		const notify = (message: string, kind: "info" | "warning" = "info") => {
 			if (ctx.hasUI) ctx.ui.notify(message, kind);
 		};
 
 		try {
-			const live = event.branchEntries.filter(isVisible);
+			// event.branchEntries 是「从根到叶子」的全部条目，里面还躺着上一轮已经折进
+			// previousSummary 的那批消息。不跳过它们就会重复渲染：第 2 轮摘要 = 上轮摘要
+			// + 全部历史渲染，越压越大。所以从最后一个 compaction 的 firstKeptEntryId 起算。
+			const live = liveFromLastCompaction(event.branchEntries);
 
-			// 从末尾数 KEEP_MSGS 条，之前的部分压成文本
-			let cut = Math.max(0, live.length - KEEP_MSGS);
-			// 切点不能落在 toolResult 上，否则 toolCall 和结果会被拆开
-			while (cut < live.length) {
-				const e = live[cut];
-				if (e.type === "message" && e.message.role === "toolResult") cut++;
-				else break;
+			// 切点直接用 pi 算好的那个：它按 compaction.keepRecentTokens（默认 20000 tok）
+			// 从末尾往回累加，并且保证落在合法边界上（不会把 toolCall 和 toolResult 拆开）。
+			// 我们不重复实现这套逻辑，只负责把切点之前的内容渲染成文本。
+			const cut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);
+			if (cut <= 0) {
+				// cut === 0：pi 说一条都不用压（本来也不会调到这里）
+				// cut === -1：切点不在可见条目里，说明这一轮没得压
+				notify("这一轮没有可压缩的内容，已跳过", "warning");
+				return { cancel: true };
 			}
 
-			if (cut === 0) {
-				// 没有比最近 KEEP_MSGS 条更早的内容
-				if (event.reason === "manual") {
-					notify(`最近 ${KEEP_MSGS} 条消息之前的没有内容，无需压缩`);
-					return { cancel: true };
-				}
-				// 自动阈值 / 溢出：pi 已经判定超预算，改用它的切点做算法压缩
-				const piCut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);
-				if (piCut <= 0) return { cancel: true };
-				cut = piCut;
-			}
-
-			const body = render(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
+			const cfg = loadConfig();
+			const body = makeRender(cfg)(live.slice(0, cut), buildRefs(ctx.sessionManager.getEntries()));
 			if (!body.trim()) {
 				notify("待压缩的历史渲染为空，已取消", "warning");
 				return { cancel: true };
 			}
 
 			// 多轮：上一轮的摘要原样前置（剥掉它自己的格式说明和尾注，避免每轮累加）
-			const prev = event.preparation.previousSummary
-				?.replace(FORMAT_RE, "")
-				.replace(TAIL_RE, "")
-				.trim();
+			let prev = event.preparation.previousSummary?.replace(FORMAT_RE, "").replace(TAIL_RE, "").trim();
+
+			// 折叠旧轮次的工具调用：只有最新一轮（body）保留完整细节
+			if (prev && cfg.collapseOldTools) {
+				prev = collapseToolBlocks(prev, ({ calls, lo, hi }) =>
+					`（调用工具 ${calls} 次 ${lo === hi ? `#${lo}` : `#${lo}–#${hi}`}）`,
+				);
+			}
+
 			const summary = `${FORMAT_NOTE}\n\n${prev ? `${prev}\n\n---\n\n` : ""}${body}\n\n---\n${TAIL_NOTE}`;
 
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId: live[cut]?.id ?? "",
+					// 原样用 pi 的切点
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
 					tokensBefore: event.preparation.tokensBefore,
 				},
 			};
@@ -481,7 +629,7 @@ const ENTRIES = [
   { id:"m8b",g:125, role:"assistant", think:"用例写好了，覆盖 reset 之后 refresh 要轮换", text:"用例写好了：reset 之后 refresh 必须轮换" },
   { id:"m9", g:126, role:"assistant", think:"跑测试", text:"跑一下", tool:{ name:"bash", args:'{"command":"bun test tests/auth-refresh.test.ts"}', resLen:830 } },
   { id:"m10",g:126, role:"toolResult", name:"bash", resLen:830, text:"bun test v1.4.3\n✓ reset rotates refresh token (12ms)\n… 14 passed" },
-  /* ── 下面这段是为了让「最近 20 条」这个数有东西可数：一串例行巡检 ── */
+  /* ── 下面这段是一串例行巡检，用来把「被折叠的那半」撑出足够的内容 ── */
   { id:"m11",g:127, role:"assistant", think:"顺手看下 CI 和依赖", text:"顺便看下 CI",
     tool:{ name:"bash", args:'{"command":"gh run list --limit 5"}', resLen:640 } },
   { id:"m12",g:128, role:"toolResult", name:"bash", resLen:640, text:"✓ build  1m02s\n✓ test   2m14s\n✓ lint   18s" },
@@ -521,20 +669,34 @@ const hiddenIdx  = ENTRIES.reduce((a, e, i) => (isVis(e) ? a : (a.push(i), a)), 
 function isVis(e){ return (e.role !== "system" && e.role !== "meta"); }
 function isNumbered(e){ return e.role !== "meta"; }
 
-// 切点：从末尾数 KEEP_MSGS 条
-const KEEP = 20;
-const naiveCut = Math.max(0, visibleIdx.length - KEEP);
+// 切点：pi 按 compaction.keepRecentTokens 从末尾往回累加算出来的
+// naiveCut = 累加到达门槛的那一格（可能落在 toolResult 上）
+// snappedCut = pi 把它挪到的合法边界（findProjectedCutPoint 干的）
+// 演示里这个示例会话只有 ~3000 tok，所以把门槛缩到 1700 才能看见切点。
+// 真实默认是 20000（compaction.keepRecentTokens），算法完全一样。
+const KEEP_TOKENS = 1700;
+const KEEP_TOKENS_REAL = 20000;
+const approxTok = e => Math.round(((e.text || '').length + (e.tool ? e.tool.args.length + (e.tool.resLen || 0) : 0)) / 4) + 8;
+const naiveCut = (() => {
+  let acc = 0;
+  for (let v = visibleIdx.length - 1; v >= 0; v--) {
+    acc += approxTok(byId[ENTRIES[visibleIdx[v]].id]);
+    if (acc >= KEEP_TOKENS) return v;
+  }
+  return 0;
+})();
 const snappedCut = (() => { let c = naiveCut; while (c < visibleIdx.length && byId[ENTRIES[visibleIdx[c]].id].role === "toolResult") c++; return c; })();
 const cutEntryId = ENTRIES[visibleIdx[snappedCut]].id;
+const keptTok = visibleIdx.slice(snappedCut).reduce((a, i) => a + approxTok(byId[ENTRIES[i].id]), 0);
 
 /* 渲染后的文本行：直接从被折叠区生成，规则和 pi-compaction.ts 的 render() 一致 */
 const CHIP = g => `<span class="chip" data-g="${g}">#${g}</span>`;
+const CFG_TOOL_ARGS = 300, CFG_RES_HEAD = 200, CFG_RES_TAIL = 100;
 function clipH(s, n){ return s.length <= n ? s : `${s.slice(0,n)}<span class="cut-ell">…(+${s.length-n})</span>`; }
-function clipHT(s, n){
-  if (s.length <= n) return s;
-  const H = Math.round(n*0.7), T = n - H, cut = s.length - n;
-  if (cut < T) return `${s.slice(0,n)}<span class="cut-ell">…(+${cut})</span>`;
-  return `${s.slice(0,H)}<span class="cut-ell">…(+${cut})…</span>${s.slice(-T)}`;
+function clipHT(s, head, tail){
+  if (s.length <= head + tail) return s;
+  const cut = s.length - head - tail;
+  return `${s.slice(0,head)}<span class="cut-ell">…(+${cut})${tail > 0 ? "…" : ""}</span>${tail > 0 ? s.slice(-tail) : ""}`;
 }
 /* 编号直接嵌在标题里：从「正文末尾 (井号N)」挪到「标题行内」的改版 */
 const K = n => `<span class="tagk" data-g="${n}">#${n}</span>`;
@@ -549,11 +711,37 @@ for (let v = 0; v < snappedCut; v++) {
     RENDERED.push({ grp:1, html:`<span class="k">[user${k}]</span> $ ${esc(escBody(e.command))}\n${esc(escBody(e.output))}` });
   } else if (e.role === "assistant") {
     if (e.text) RENDERED.push({ grp:1, html:`<span class="k">[assistant${k}]</span>\n${esc(escBody(e.text))}` });
-    if (e.tool) RENDERED.push({ grp:2, html:`<span class="c">*</span> ${esc(e.tool.name)}${k} ${clipH(esc(escBody(e.tool.args)), 500)}` });
+    if (e.tool) RENDERED.push({ grp:2, html:`<span class="c">*</span> ${esc(e.tool.name)}${k} ${clipH(esc(escBody(e.tool.args)), CFG_TOOL_ARGS)}` });
   } else if (e.role === "toolResult") {
-    RENDERED.push({ grp:2, html:`<span class="r">→</span>${k} ${clipHT(esc(escBody(e.text)), 500)}` });
+    RENDERED.push({ grp:2, html:`<span class="r">→</span>${k} ${clipHT(esc(escBody(e.text)), CFG_RES_HEAD, CFG_RES_TAIL)}` });
   }
 }
+
+/* 折叠版：把连续的 grp:2（工具）行合成一行，用来演示 collapseOldTools */
+const RENDERED_FOLDED = (() => {
+  const out = [];
+  let run = null;
+  const flush = () => {
+    if (!run) return;
+    let calls = 0; const nums = [];
+    for (const h of run) {
+      if (/class="c"/.test(h)) calls++;
+      const m = h.match(/data-g="(\d+)"/g);
+      if (m) for (const x of m) nums.push(Number(x.match(/\d+/)[0]));
+    }
+    if (!calls) { for (const h of run) out.push({ grp: 2, html: h }); run = null; return; }
+    const lo = Math.min(...nums), hi = Math.max(...nums);
+    out.push({ grp: 2, html: `<span class="foldmark">（调用工具 ${calls} 次 ${lo === hi ? "#" + lo : "#" + lo + "–#" + hi}）</span>` });
+    run = null;
+  };
+  for (const d of RENDERED) {
+    if (d.grp === 2) { (run ||= []).push(d.html); continue; }
+    flush();
+    out.push(d);
+  }
+  flush();
+  return out;
+})();
 
 /* ── 步骤定义 ──────────────────────────────── */
 const STEPS = [
@@ -570,27 +758,28 @@ const STEPS = [
     title:"只留上下文可见的条目",
     bullets:[
       "<code>isVisible</code> 做三件事：丢掉 <code>role:\"system\"</code> 的条目（pi 1.x 每轮把 prompt/tool loadout 持久化成 system 消息）、丢掉 <code>model_change</code> 这类纯元数据、保留 message / custom_message / branch_summary。",
-      "为什么要过滤：这些条目既不进摘要、又占 <code>branchEntries</code> 的位置，混进来会让「数 20 条」数错。",
-      "pi 自己的 <code>preparation.messagesToSummarize</code> 基本不用 —— 切点自己算；只有「最近 20 条之外没东西」时，才借用 pi 的 <code>firstKeptEntryId</code> 兜底。"
+      "为什么要过滤：这些条目既不进摘要、也不该被渲染成文本，混进来只会多出无意义的行。切点是 pi 给的，不受影响。",
+      "另外还有一层：<code>liveFromLastCompaction</code> 从上一个 compaction 的 <code>firstKeptEntryId</code> 起算 —— 上一轮已经折进摘要的那批消息还在 <code>branchEntries</code> 里，不跳过就会重复渲染（实测第 2 轮摘要膨胀 3.4 倍）。"
     ],
     state(i){ return hiddenIdx.includes(i) ? "drop" : "raw"; }, tokens:70
   },
   {
-    title:"从末尾数 20 条，划切点",
+    title:"切点由 pi 算好，我们原样用",
     bullets:[
-      "<code>KEEP_MSGS = 20</code>：<code>cut = live.length - 20</code>，<code>live[cut]</code> 之前全部压成文本，之后的原样保留。实测 20 条 ≈ 6k token，只占 1M 窗口的 0.6%。",
-      "返回的 <code>firstKeptEntryId</code> 决定 pi 从哪条开始重建上下文。pi 不校验这个 id —— 传了不存在的 id，效果等于「一条都不留」。",
-      "可见条目有 " + visibleIdx.length + " 条，所以候选切点是第 " + (naiveCut+1) + " 条（" + ENTRIES[visibleIdx[naiveCut]].role + "）。"
+      "pi 在调 hook 之前已经跑过 <code>prepareCompaction</code>：按 <code>compaction.keepRecentTokens</code>（默认 <b>20000 tok</b>）从末尾往回累加，到达门槛的那一格就是候选切点。",
+      "我们不重复实现这套逻辑 —— 只做 <code>live.findIndex(e =&gt; e.id === event.preparation.firstKeptEntryId)</code> 拿到位置，然后把之前的内容渲染成文本。",
+      "本页示例会话只有 ~" + (visibleIdx.reduce((a,i)=>a+approxTok(byId[ENTRIES[i].id]),0)) + " tok，所以演示里把门槛缩到 " + KEEP_TOKENS + " 才能看见切点；真实默认是 " + KEEP_TOKENS_REAL + "。",
+      "累加到第 " + (naiveCut+1) + " 条（<code>" + ENTRIES[visibleIdx[naiveCut]].id + "</code> / " + ENTRIES[visibleIdx[naiveCut]].role + "）时够 " + KEEP_TOKENS + " tok，候选切点落在那里。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v < naiveCut ? "sum" : (v === naiveCut ? "cut" : "kept"); },
     tokens:70, cutAt:naiveCut
   },
   {
-    title:"切点落在 toolResult 上 → 右移一格",
+    title:"切点不会落在 toolResult 上",
     bullets:[
-      "候选切点是 <code>toolResult</code> —— 如果把 <code>firstKeptEntryId</code> 定在这，pi 会保留这条结果、却删掉它对应的 <code>toolCall</code>，请求直接非法。",
-      "<code>while</code> 把切点往后挪，直到落在 user / assistant / bash / custom 上。宁可少留一条，也不要把 call 和 result 拆开。",
-      "结果：保留 " + (visibleIdx.length - snappedCut) + " 条（不是 20 条），被压的是前 " + snappedCut + " 条。"
+      "候选位置正好是 <code>toolResult</code> —— 如果把 <code>firstKeptEntryId</code> 定在这，pi 会保留结果、却删掉它对应的 <code>toolCall</code>，请求直接非法。",
+      "这件事 <b>pi 自己已经处理了</b>：<code>findProjectedCutPoint</code> 只从 <code>cutPoints</code> 里挑，而 <code>toolResult</code> 压根不在候选集合里。所以它把切点往后挪到第 " + (snappedCut+1) + " 条。",
+      "结果：保留 " + (visibleIdx.length - snappedCut) + " 条、约 " + keptTok + " tok，被压的是前 " + snappedCut + " 条。我们这边的代码只有一行 <code>findIndex</code>。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v < snappedCut ? "sum" : (v === snappedCut ? "cut" : "kept"); },
     tokens:70, cutAt:snappedCut
@@ -617,11 +806,12 @@ const STEPS = [
     tokens:70, cutAt:snappedCut, renderRows:[0,3,7,8], renderGroup:1
   },
   {
-    title:"thinking 丢掉，工具只留 500 字",
+    title:"thinking 丢掉，工具三个数各自截断",
     bullets:[
       "assistant 的 <code>content</code> 是个数组：<code>thinking</code> / <code>text</code> / <code>toolCall</code> 混在一起。循环里只处理 text 和 toolCall，<b>thinking 分支根本不存在</b> —— 就这么删掉的。",
-      "<code>toolCall</code> 的参数先 <code>JSON.stringify</code> 再 <code>clip(…, 500)</code>，<b>只取头部</b>：JSON 的关键字段（path / command）都在前面。",
-      "<code>toolResult</code> 走 <code>clipTail</code>：<b>头 350 + 尾 150</b>。只取头会丢 <code>exit code</code> / 报错 / 栈底 —— 实测错误信息绝大多数落在末尾。"
+      "<code>toolCall</code> 的参数先 <code>JSON.stringify</code> 再 <code>clip(…, toolArgs)</code>，<b>只取头部</b>：JSON 的关键字段（path / command）都在前面。默认 <b>300</b> 字。",
+      "<code>toolResult</code> 走 <code>clipHeadTail</code>：<b>头 " + CFG_RES_HEAD + " + 尾 " + CFG_RES_TAIL + "</b>。只取头会丢 <code>exit code</code> / 报错 / 栈底 —— 实测错误信息绝大多数落在末尾。",
+      "三个数都在 <code>~/.pi/agent/pi-compaction.json</code> 里，独立可调（<code>toolArgs</code> / <code>toolResultHead</code> / <code>toolResultTail</code>）。总截断量从旧的 500×2 降到 " + (CFG_TOOL_ARGS + CFG_RES_HEAD + CFG_RES_TAIL) + "，本机真实会话的摘要小了 21%。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },
     tokens:70, cutAt:snappedCut, renderRows:"all", renderGroup:2
@@ -644,7 +834,7 @@ const STEPS = [
       "它只说一件事：行首无反斜杠的 <code>[user#N]</code> / <code>→#N</code> 才是条目，其余都是上一条的正文。84 字符 ≈ 21 token，比把正文全部缩进（+743 token）便宜得多。",
       "<code>previousSummary</code> 有值就前置拼接，但会先用 <code>FORMAT_RE</code> 剥掉它自己的格式说明和尾注 —— 不然每轮累加一份。",
       "<b>绝不 return undefined</b>：undefined 在 pi 里等于「我不接管，你走默认 LLM 摘要」。每条出口要么 <code>{compaction}</code>，要么 <code>{cancel:true}</code>。",
-      "<code>cut === 0</code>（最近 20 条之外空集）：手动 <code>/compact</code> → 提示一句然后 <code>cancel</code>；自动阈值/溢出 → 改用 <code>preparation.firstKeptEntryId</code> 当切点照常算法压缩，仍然不调模型。"
+      "<code>cut &lt;= 0</code>（pi 的切点在第 1 条、或者根本不在可见条目里）：<code>notify</code> 一句然后 <code>cancel</code>，什么都不做。宁可让 pi 报「Nothing to compact」，也不替它编一个切点。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },
     tokens:70, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true
@@ -660,22 +850,24 @@ const STEPS = [
     tokens:4, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true, keptOn:true, collapse:true
   },
   {
-    title:"第二轮：上一轮的文本原样带上",
+    title:"第二轮：旧轮次的工具调用被折叠",
     bullets:[
       "第 2 轮时 <code>preparation.previousSummary</code> = 第 1 轮那段文本，新窗口 = 上轮留下的 " + (visibleIdx.length - snappedCut) + " 条 + 新消息。",
-      "所以冲销掉的部分永远只是<b>工具输出</b>，攒下来的是用户/助手正文 —— 每轮增量很小，2～3 轮完全不虚。",
-      "注意：已经变成文本的内容没法再按结构裁（thinking 已经没了、参数已经断了），所以别指望第 3 轮还能二次优化 —— 你本来也不需要。"
+      "<b>关键改动</b>：先剥掉旧摘要自己的格式说明和尾注，再用 <code>collapseToolBlocks</code> 把里面的 <code>* 工具#N</code> / <code>→#N</code> 连续块合并成一行 <code>（调用工具 7 次 #2–#8）</code>。",
+      "<b>用户消息和助手正文一字不动</b>，只有工具细节被折叠。折叠行带编号范围，模型可以 <code>recall range:[2,8]</code> 把原文取回来。",
+      "<b>只有最新一轮保留完整细节</b>：本次刚渲染好的 <code>body</code> 不折叠，折的是 <code>previousSummary</code>。",
+      "对比：6 轮压缩后摘要 11,616 → 3,744 字符（<b>-68%</b>）；一直聊到摘要吃满 1M 窗口，压缩次数从 180 次变 764 次。开关是 <code>collapseOldTools</code>，默认开。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v >= snappedCut ? "kept" : "ghost"; },
-    tokens:4, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true, keptOn:true, collapse:true, round2:true
+    tokens:4, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true, keptOn:true, collapse:true, round2:true, folded:true
   },
   {
     title:"回查：点一下 #N",
     bullets:[
-      "点右边摘要里的 <code>#N</code>，左边对应的原始条目会亮起来 —— 模型就是靠这个把「被截断的 500 字」换回全文的。",
+      "点右边摘要里的 <code>#N</code>，左边对应的原始条目会亮起来 —— 模型就是靠这个把「被截断成 " + CFG_RES_HEAD + " + " + CFG_RES_TAIL + " 字的结果」换回全文的。",
       "回查工具读的是 session 条目（原文永远在），按同一个编号空间取；<code>expand:[N]</code> 会把 toolCall 配对的那条 toolResult 一起带出来。",
       "<b>批量</b>：<code>expand:[3, 7, 12]</code> 一次给多个，同一编号不会重复输出。<b>图片</b>：加 <code>image:true</code> 把原始 image 块真带回来（上限 6 张 / 6 MB，超了会明说）。",
-      "所以划算：<code>截断到 500 字 + 一个编号</code> 远便宜于「把 4000 字塞进上下文」，模型只在真的需要时才付这个钱。"
+      "所以划算：<code>截断到 " + (CFG_RES_HEAD + CFG_RES_TAIL) + " 字 + 一个编号</code> 远便宜于「把 4000 字塞进上下文」，模型只在真的需要时才付这个钱。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },
     tokens:4, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true, keptOn:true, collapse:true, recall:true
@@ -688,7 +880,7 @@ const STEPS = [
       "<code>&lt;/summary&gt;</code> 不转义 → 提前闭合 pi 的外层包裹，后面的内容跑到 summary 外面去。",
       "<code>…(+N)</code> 不转义 → 模型以为这段被截断了，实际上一个字没少，白白去 recall 一次。",
       "老格式的 <code>(#14)</code> 也一并转义，免得模型拿它去 recall 到<b>别的</b>消息上。",
-      "<code>esc()</code> 只在行首真撞上时加一个 <code>\</code>。本机这份 32k token 的摘要实测只多 <b>6 个字符</b>。"
+      "<code>esc()</code> 只在行首真撞上时加一个 <code>\</code>。本机这份 21k token 的摘要实测只多 <b>7 个字符</b>。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },
     tokens:4, cutAt:snappedCut, renderRows:"all", renderGroup:2, summaryOn:true, keptOn:true, collapse:true
@@ -769,18 +961,30 @@ function miniHTML(e){
   return esc(e.text || '');
 }
 
-/* summary 面板里的行 */
+/* summary 面板里的行：正常版 + 折叠版两套，切步骤时互换 */
 const sumBody = document.getElementById("sumBody");
-const sumLineEls = RENDERED.map((d, i) => {
-  const el = document.createElement("div");
-  el.className = "sumline";
-  el.innerHTML = d.html;
-  sumBody.append(el);
-  return { el, grp: d.grp };
-});
+const sumWrapA = document.createElement("div");
+const sumWrapB = document.createElement("div");
+sumBody.append(sumWrapA, sumWrapB);
+sumWrapB.style.display = "none";
+
+function buildSumLines(rendered){
+  return rendered.map(d => {
+    const el = document.createElement("div");
+    el.className = "sumline";
+    el.innerHTML = d.html;
+    return { el, grp: d.grp };
+  });
+}
+const sumLineElsA = buildSumLines(RENDERED);
+const sumLineElsB = buildSumLines(RENDERED_FOLDED);
+sumLineElsA.forEach(({ el }) => sumWrapA.append(el));
+sumLineElsB.forEach(({ el }) => sumWrapB.append(el));
+let sumLineEls = sumLineElsA;
 const formatNote = document.createElement("div");
 formatNote.className = "sumline fmtnote";
-formatNote.innerHTML = "格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本。";
+formatNote.dataset.pin = "top";
+formatNote.innerHTML = "格式：以 [user#N] / [assistant#N] / * 工具#N / →#N 开头的行是条目（行首无反斜杠）；其余是上一条的正文；带反斜杠的是正文字面文本；「（调用工具 N 次 #a–#b）」是已折叠的旧工具调用，原文用 recall range 取。";
 sumBody.prepend(formatNote);
 const tailNote = document.createElement("div");
 tailNote.className = "sumline";
@@ -840,26 +1044,35 @@ STEPS.forEach((_, i) => {
 const ANCHORS = [
   // 1 触发
   ['pi.on("session_before_compact"'],
-  // 2 可见性
-  [{from:'const isVisible = (e: any) =>', to:'e.type === "branch_summary";'}, 'event.branchEntries.filter(isVisible)'],
-  // 3 切点
-  ['let cut = Math.max(0, live.length - KEEP_MSGS);'],
-  // 4 右移
-  [{from:'while (cut < live.length) {', to:'else break;'}],
+  // 2 可见性 + liveFromLastCompaction
+  [{from:'const isVisible = (e: any) =>', to:'e.type === "branch_summary";'}, 'event.branchEntries.filter(isVisible)',
+   {from:'const liveFromLastCompaction = (branch: any[]) => {', to:'return branch.slice(start).filter(isVisible);'}, 'const live = liveFromLastCompaction(event.branchEntries);'],
+  // 3 切点来自 pi
+  [{from:'const cut = live.findIndex((e: any) => e.id === event.preparation.firstKeptEntryId);', to:'const cut = live.findIndex'},
+   '// 切点直接用 pi 算好的那个'],
+  // 4 cut <= 0 兜底
+  [{from:'if (cut <= 0) {', to:'return { cancel: true };'}],
   // 5 全局编号
   [{from:'const buildRefs = (entries: any[]) => {', to:'return m;'}, 'buildRefs(ctx.sessionManager.getEntries())'],
   // 6 正文照抄 + bashExecution
   [{from:'if (msg.role === "bashExecution") {', to:'continue;'}, 'if (m.role === "user")', 'const text = (c: unknown): string =>'],
-  // 7 截断
-  [{from:'const clip = (s: string, n: number)', to:'};'}, {from:'const clipTail = (s: string) => {', to:'};'}, 'else if (m.role === "toolResult")', '// thinking 块直接不输出'],
+  // 7 三个截断参数
+  ['const DEFAULTS = {', 'const loadConfig = (): ClipConfig =>', {from:'const clip = (s: string, n: number)', to:'};'},
+   {from:'const clipHeadTail = (s: string, head: number, tail: number) => {', to:'};'},
+   'else if (m.role === "toolResult")', '// thinking 块直接不输出', 'clip(esc(JSON.stringify(p.arguments ?? {})), cfg.toolArgs)'],
   // 8 图片 + !!
   ['const imgTag = (mimeType: string)', 'if (msg.excludeFromContext) continue;', 'else if (p.type === "image") buf.push(imgTag(p.mimeType));'],
   // 9 拼起来 + 格式说明
-  ['const FORMAT_NOTE =', 'const TAIL_NOTE =', {from:'const prev = event.preparation.previousSummary', to:'};'}, {from:'const summary = `${FORMAT_NOTE}', to:'};'}],
+  ['const FORMAT_NOTE =', 'const TAIL_NOTE =', {from:'const summary = `${FORMAT_NOTE}', to:'};'}],
   // 10 重建上下文
   [],
-  // 11 第二轮
-  ['const FORMAT_RE =', 'const TAIL_RE ='],
+  // 11 折叠
+  ['const collapseToolBlocks = (text: string',
+   'const NEW_BLOCK = /^(',
+   {from:'\t\tif (calls === 0) {', to:'\t\t\trun = [];'},
+   {from:'\t\tif (b.tool) {', to:'\t\t\tout.push(b.lines.join("\\n").replace(/\\n+$/, ""));'},
+   {from:'// 折叠旧轮次的工具调用', to:'#${lo}–#${hi}'},
+   'collapseOldTools: true'],
   // 12 回查
   [{from:'const buildRefs = (entries: any[]) => {', to:'return m;'}],
   // 13 转义
@@ -930,12 +1143,21 @@ function go(n){
   keptCard.classList.toggle("on", !!S.keptOn);
   keptHead.textContent = `从 firstKeptEntryId 起的原始消息（${keptEntries.length} 条，原样）`;
   keptCard.querySelector(".card-h").style.color = "#9aa7b8";
+  // 折叠版只在「多轮折叠」那一步显示
+  const useFolded = !!S.folded;
+  sumWrapA.style.display = useFolded ? "none" : "";
+  sumWrapB.style.display = useFolded ? "" : "none";
+  sumLineEls = useFolded ? sumLineElsB : sumLineElsA;
   sumLineEls.forEach(({ el, grp }) => el.classList.toggle("on", S.renderGroup != null && grp <= S.renderGroup));
   formatNote.classList.toggle("on", S.renderGroup != null);
   tailNote.classList.toggle("on", S.renderGroup != null);
   sumCard.classList.toggle("off", S.renderGroup == null && !S.summaryOn);
   prevOver.classList.toggle("on", !!S.round2);
-  prevOverBody.textContent = S.round2 ? "（第 1 轮的 " + RENDERED.length + " 行文本原样前置，然后接本轮新窗口的渲染）" : "";
+  prevOverBody.textContent = S.round2
+    ? (S.folded
+        ? "（第 1 轮的 " + RENDERED.length + " 行文本先被折叠：连续的工具块合成「（调用工具 N 次 #a–#b）」→ " + RENDERED_FOLDED.length + " 行，然后接本轮新窗口的渲染）"
+        : "（第 1 轮的 " + RENDERED.length + " 行文本原样前置，然后接本轮新窗口的渲染）")
+    : "";
 
   // token 条
   const pctA = S.tokens, pctB = S.collapse ? S.tokens : 70;
