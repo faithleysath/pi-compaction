@@ -4,3 +4,4 @@ bun.lock
 bun.lockb
 pnpm-lock.yaml
 .DS_Store
+tests/e2e/.runs/

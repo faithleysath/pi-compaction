@@ -135,6 +135,8 @@ export default function (pi: ExtensionAPI) {
 			`expand and notices stop at ${MAX_TEXT_CHARS} chars. When that happens they print the exact slice call to continue from. Pass its next_offset back into slice until has_more is false.`,
 			"Use the next_offset value as given — do not compute your own offsets. Chunks are aligned to line and emoji boundaries, so hand-computed offsets drift and skip text.",
 			"Only continue if you actually need the rest — re-reading a huge log refills the context compaction just freed.",
+			"If you don't know the #N, search with query first — don't guess it.",
+			"Skip recall when the summary already answers; don't bulk-restore logs you don't need.",
 			"expand accepts several numbers at once (batch). Add image: true to get the real image blocks.",
 			"#N is the number shown in summary headers like [user#12] / * read#12 / →#13. Only the current session is searchable.",
 			"Extension-injected notifications (e.g. pi-bg-bash completion / watch output) are not messages, so they have no #N: pass their index in notices to read one in full.",
