@@ -523,19 +523,6 @@ console.log("\n[9h] 后台任务：命令绑定在结果行里，折叠后能带
   const noDot = renderWith(mkOne("bash", { command: "x", background: true }, "Started background task bg-5 without the period"));
   check("形状不完全一致时不改写", !noDot.includes("Started background task bg-5 (cmd"), noDot.slice(0, 300));
 
-  // 老格式摘要（命令只写在 `*` 行）：不崩，只是没有命令
-  const legacyPrev = [
-    "格式：x", "",
-    "[user#1]", "起构建", "",
-    "* bash#2 {\"command\":\"npm run build\",\"background\":true}", "",
-    "→#3 Started background task bg-1. Its completion is reported automatically.", "",
-    "---", "可用 recall 工具按 #N 取原文；图片可加 image:true 取回。",
-  ].join("\n");
-  const legacy = run([user("u1", "q"), asst("a1", "a"), user("u2", "后续 " + "x".repeat(4000))],
-    { reason: "manual", firstKept: "u2", prev: legacyPrev });
-  const ls: string = legacy.res?.compaction?.summary ?? "";
-  check("老格式摘要仍能认出 bg-1", /\[background\] bg-1 started/.test(ls), ls.slice(0, 300));
-  check("老格式没有命令时不编造", !/bg-1 started:/.test(ls), ls.slice(0, 300));
 }
 
 console.log("\n[9i] 旧轮次的 pi-bg-bash 通知折成一行");

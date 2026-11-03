@@ -313,14 +313,6 @@ const loadConfig = (): ClipConfig => {
 	} catch {
 		return { ...DEFAULTS };
 	}
-	// 老版本只有一个 toolChars：按 70% / 30% 拆成头尾，工具参数沿用它
-	if (raw?.toolChars !== undefined) {
-		const n = raw.toolChars;
-		if (isCharCount(n) && n > 0) {
-			const head = Math.round(n * 0.7);
-			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head, collapseOldTools: DEFAULTS.collapseOldTools };
-		}
-	}
 	return {
 		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
 		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
@@ -358,7 +350,7 @@ const clipHeadTail = (s: string, head: number, tail: number) => {
  */
 const esc = (s: string) =>
 	s
-		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 老格式 (#N)：别让模型拿它去 recall
+		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 内容里的 (#N)：别让模型拿它当真的编号去 recall
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
 		// 假结构行：[user#12] / [assistant] / * bash#3 / →#4 一律转义，免得伪装成真条目
@@ -377,9 +369,9 @@ const FORMAT_NOTE =
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "Fetch the original text of any #N with the recall tool; add image:true to get images back.";
-const TAIL_RE = /\n*---\n(?:可用 recall 工具[^\n]*|Fetch the original text[^\n]*)\n?\s*$/;
+const TAIL_RE = /\n*---\nFetch the original text[^\n]*\n?\s*$/;
 /** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
-const FORMAT_RE = /^(?:格式：|Format:)[^\n]*\n*/;
+const FORMAT_RE = /^Format:[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
@@ -1052,7 +1044,7 @@ const STEPS = [
       "<code>[user#9]</code> 开头不转义 → 工具结果里的一行会被读成<b>用户新说的一句话</b>。这是最危险的一个：读个 README 就能把指令注进摘要。",
       "<code>&lt;/summary&gt;</code> 不转义 → 提前闭合 pi 的外层包裹，后面的内容跑到 summary 外面去。",
       "<code>…(+N)</code> 不转义 → 模型以为这段被截断了，实际上一个字没少，白白去 recall 一次。",
-      "老格式的 <code>(#14)</code> 也一并转义，免得模型拿它去 recall 到<b>别的</b>消息上。",
+      "内容里出现的 <code>(#14)</code> 也一并转义，免得模型拿它去 recall 到<b>别的</b>消息上。",
       "<code>esc()</code> 只在行首真撞上时加一个 <code>\</code>。本机这份 21k token 的摘要实测只多 <b>7 个字符</b>。"
     ],
     state(i){ const v = visibleIdx.indexOf(i); if (v < 0) return "drop"; return v > snappedCut ? "kept" : v === snappedCut ? "cut" : "sum"; },

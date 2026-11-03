@@ -51,14 +51,6 @@ const loadConfig = (): ClipConfig => {
 	} catch {
 		return { ...DEFAULTS };
 	}
-	// 老版本只有一个 toolChars：按 70% / 30% 拆成头尾，工具参数沿用它
-	if (raw?.toolChars !== undefined) {
-		const n = raw.toolChars;
-		if (isCharCount(n) && n > 0) {
-			const head = Math.round(n * 0.7);
-			return { toolArgs: n, toolResultHead: head, toolResultTail: n - head, collapseOldTools: DEFAULTS.collapseOldTools };
-		}
-	}
 	return {
 		toolArgs: isCharCount(raw?.toolArgs) ? raw.toolArgs : DEFAULTS.toolArgs,
 		toolResultHead: isCharCount(raw?.toolResultHead) ? raw.toolResultHead : DEFAULTS.toolResultHead,
@@ -96,7 +88,7 @@ const clipHeadTail = (s: string, head: number, tail: number) => {
  */
 const esc = (s: string) =>
 	s
-		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 老格式 (#N)：别让模型拿它去 recall
+		.replace(/\(#(\d+)\)/g, "(\\#$1)") // 内容里的 (#N)：别让模型拿它当真的编号去 recall
 		.replace(/\(collapsed /g, "(\\collapsed ") // 假的折叠标记
 		.replace(/…\(\+(\d+)\)/g, "…(\\+$1)") // 假截断标记
 		.replace(/<\/summary>/gi, "<\\/summary>") // 不让它提前闭合 pi 的 <summary> 包裹
@@ -117,9 +109,9 @@ const FORMAT_NOTE =
 
 /** 上一轮末尾的提示语，拼接前剥掉，不然每轮累加一份 */
 const TAIL_NOTE = "Fetch the original text of any #N with the recall tool; add image:true to get images back.";
-const TAIL_RE = /\n*---\n(?:可用 recall 工具[^\n]*|Fetch the original text[^\n]*)\n?\s*$/;
-/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会让旧摘要剥不掉 */
-const FORMAT_RE = /^(?:格式：|Format:)[^\n]*\n*/;
+const TAIL_RE = /\n*---\nFetch the original text[^\n]*\n?\s*$/;
+/** 剥掉首行的格式说明。用前缀匹配而不是整串，改措辞也不会剥不掉 */
+const FORMAT_RE = /^Format:[^\n]*\n*/;
 
 /** 图片只留一个占位符：`[image png]`。正文进不了摘要，但模型得知道这儿有张图 */
 const imgTag = (mimeType: string) => `[image ${String(mimeType).replace(/^image\//, "")}]`;
@@ -206,7 +198,7 @@ const collapseToolBlocks = (text: string, marker: (run: { calls: number; lo: num
 			for (const l of b.lines) {
 				const st = l.match(BG_START_LINE);
 				if (!st) continue;
-				const cmd = l.match(/[（(]cmd: ([^）)]*)[）)]/)?.[1] ?? "";
+				const cmd = l.match(/\(cmd: ([^)]*)\)/)?.[1] ?? "";
 				started.push({ id: st[1], cmd });
 			}
 		}

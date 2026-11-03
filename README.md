@@ -112,7 +112,6 @@ Fetch the original text of any #N with the recall tool; add image:true to get im
 - `tail: 0` → 只截头，标记只出现一次
 - 三个都是 `0` → 参数和结果整体塌成一个 `…(+N)` 标记（只留「调用过」这个事实）
 - 单项非法（负数、非整数、字符串）→ 该项回落到默认值，其余照常
-- 老配置 `{ "toolChars": 500 }` 仍然兼容，按 70% / 30% 拆成 `toolResultHead` / `toolResultTail`
 
 ## 和后台任务扩展共存（pi-bg-bash）
 
